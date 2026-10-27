@@ -1,0 +1,11 @@
+# R / RStudio working files
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj.user/
+
+# Knit / rendered output
+*.html
+*.pdf
+*.docx
