@@ -13,49 +13,53 @@ changes under conservation agriculture.
 
 | Path | Description |
 | :--- | :--- |
-| `Yield_Loop/Yield_Loop.Rmd` | Main analysis script (R Markdown). Bootstrap confidence intervals for yield change, plus soil-property meta-regressions. |
-| `Yield_Loop/subdata.csv` | Study-level dataset used by the analysis. |
-| `Yield_Loop/Yield_Loop.Rproj` | RStudio project file. |
-| `Yield_Loop.rar` | Original compressed archive of the `Yield_Loop` folder, preserved as submitted. |
-
-`Yield_Loop.rar` and the `Yield_Loop/` folder contain identical files (verified by SHA-256);
-the folder is provided separately so the code and data can be browsed and diffed directly
-on GitHub.
+| `SoilHealth_Yield_revision.Rmd` | Main analysis script (R Markdown). Generates the results and figures reported in the paper. |
+| `SoilHealth_Yield.Rproj` | RStudio project file. |
+| `data/SoilHealthDB_V2.csv` | Main dataset: soil health and crop yield observations extracted from the literature. |
+| `data/Koeppen-Geiger-ASCII.txt` | Koppen-Geiger climate classification grid, used to assign a climate class to each site. |
+| `data/SoilHealthDB_V2.xlsx` | Spreadsheet version of the database. |
+| `data/SoilHealthDB_V2(1).xlsx` | Alternate copy of the spreadsheet version. |
 
 ## What the analysis does
 
-1. **Effect size.** `yi` is the log response ratio of crop yield under conservation
-   agriculture relative to the conventional control. Effect sizes are aggregated to
-   `StudyID` / `ExperimentID` level before modelling.
-2. **Yield change by subgroup.** A bootstrap routine (`boosting_yield`, 10,000
-   resamples, `set.seed(1234567)`) converts `yi` into the percentage change in yield and
-   returns 95% confidence intervals from the bootstrap quantiles. Subgroups: climate,
-   soil texture, conservation practice group, cover crop type, and cash crop type.
-3. **Soil-property effects.** For each soil property the log ratio between the
-   conservation and control treatment (e.g. `x_OC = log(OC_T) - log(OC_C)`) is used as a
-   moderator in a linear meta-regression `lm(yi ~ x_property)`, reporting `n`, number of
-   studies, intercept, slope, slope p-value, and R². Properties covered include bulk
-   density, organic carbon, N, P, K, pH, CEC, base saturation, aggregation, porosity,
-   penetration resistance, infiltration, saturated hydraulic conductivity, erosion,
-   runoff, leaching, soil temperature, soil water content, plant-available water
-   capacity, weeds, diseases, pests, soil fauna, fungi, other microbes, enzymes, C and N
-   mineralisation, N2O, CO2, CH4, microbial biomass C and N.
+The script is organised as a sequence of R Markdown chunks:
+
+1. **Load and curate the database** (`load data`). Reads `data/SoilHealthDB_V2.csv`, merges
+   each study site with the Koppen-Geiger climate grid on rounded latitude/longitude, and
+   derives the grouping variables used throughout: `Top_Climate`, `TextureGroup`,
+   `ConservationGroup`, `CoverCropGroup` and `GrainCropGroup`.
+2. **Bootstrap the overall and subgroup yield effects** (`bootstrap`). The `boosting_yield`
+   function resamples the effect sizes 10,000 times (`set.seed(1234567)`) and returns
+   confidence intervals for the percentage change in yield. It is applied to the full
+   dataset and then to each subgroup: climate, soil texture, conservation practice
+   (no-tillage, cover crop, agroforestry, other, mixed), cover crop type and cash crop type.
+3. **Relate yield change to soil properties** (`regression`). For every soil property the
+   log ratio between the conservation and control treatment is used as a moderator in
+   `lm(y ~ log_x)` / `lm(y ~ x)`, yielding slope, p-value and R² per property.
+4. **Figures and comparisons.** Site maps, distribution checks, the effect-size figure
+   (Figure 2), radar plots comparing climates and soil-texture groups, and targeted
+   comparisons such as corn yield change under conservation agriculture and yield under
+   agroforestry.
+
+Effect sizes are log response ratios (`yi`) of crop yield under conservation agriculture
+relative to the conventional control.
 
 ## Reproducing
 
-Requirements: R (tested with the versions recorded in the session info of the Rmd),
-RStudio, and the packages listed in the setup chunk of `Yield_Loop.Yield_Loop.Rmd`:
-`data.table`, `dplyr`, `ggplot2`, `lubridate`, `kableExtra`, `knitr`, `ggpubr`,
-`ggmap`, `maps`, `mapdata`, `tidyr`, `car`, `agricolae`, `multcompView`, `bootstrap`,
-`metafor`, `e1071`, `stringr`, `rgdal`, `raster`, `patchwork`, `ggradar`, `fmsb`.
+Requirements: R and RStudio, plus the packages loaded in the `preliminaries` and
+library chunks of `SoilHealth_Yield_revision.Rmd`: `data.table`, `dplyr`, `ggplot2`,
+`lubridate`, `kableExtra`, `knitr`, `ggpubr`, `ggmap`, `maps`, `mapdata`, `tidyr`, `car`,
+`agricolae`, `multcompView`, `bootstrap`, `metafor`, `e1071`, `stringr`, `rgdal`,
+`raster`, `patchwork`, `tidyverse` and `RColorBrewer`.
 
 ```r
-setwd("Yield_Loop")
-rmarkdown::render("Yield_Loop.Rmd")
+setwd("SoilHealth_Yield")   # the folder containing the .Rmd and data/
+rmarkdown::render("SoilHealth_Yield_revision.Rmd")
 ```
 
-`subdata.csv` is read from the working directory, so open the project from the
-`Yield_Loop` folder (or `setwd()` into it) before rendering.
+The script reads its inputs from `data/` relative to the working directory and writes
+rendered output to `outputs/`, so open the project from this folder (or `setwd()` into it)
+before rendering.
 
 ## Citation
 

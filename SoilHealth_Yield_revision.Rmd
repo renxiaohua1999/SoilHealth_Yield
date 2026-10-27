@@ -1,0 +1,2565 @@
+---
+title: "SoilHealth_yield"
+author: "JinshiJian"
+date: "11/1/2021"
+output: html_document
+---
+
+```{r preliminaries, message=FALSE, include=FALSE, echo=FALSE, cache=T}
+# Set chunks defaults; these options will be applied to all subsequent chunks
+knitr::opts_chunk$set(results = 'show', message = TRUE, include = TRUE, echo = FALSE,
+                      fig.height = 4, fig.width = 8)
+# Constants
+OUTPUT_DIR		<- "outputs/"
+SEPARATOR		<- "-------------------------------------------"
+DATA_DIR <- 'data'
+# Create output and log folders if they do not exist
+if(!file.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR)
+```
+
+
+
+```{r, message=FALSE}
+library(data.table)
+# library(plyr)
+library(dplyr)
+library(ggplot2)
+theme_set(theme_bw())
+library(lubridate)
+library(kableExtra)
+library(knitr)
+library("ggpubr")
+# library(reshape)
+# install.packages("ggmap")
+library(ggmap)
+# install.packages("maps")
+library(maps)
+# install.packages("mapdata")
+library(mapdata)
+library(tidyr)
+# install.packages("car")
+library(car)
+# install.packages('agricolae')
+library(agricolae)
+# install.packages('multcompView')
+library(multcompView)
+# install.packages("bootstrap")
+library(bootstrap)
+# install.packages("metafor")
+library("metafor")
+# Source all needed functions
+# install.packages("e1071")
+library(e1071)
+library(stringr)
+# install.packages('ggmap')
+library(rgdal)
+library(raster)
+library(ggmap)
+library(patchwork)
+library(tidyverse)
+library(RColorBrewer)
+
+```
+
+
+## create functions
+```{r functions}
+# not in function
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+# this is the function to do the boostrap resampling
+boosting_yield <- function (sdata, term, treatment) {
+  k = n_rep
+  # n_sample: set it equals to the original sample size
+  mysamples = replicate(k, sample(sdata$yi, replace=T))
+  mymeans = apply(mysamples, 2, mean, na.rm = T)
+  
+  # quantile
+  BootsTest <- quantile(mymeans,c(0.025, 0.50, 0.975))
+  Boots_outputs <- tibble(term, treatment, (exp(BootsTest[[1]])-1)*100, (exp(BootsTest[[2]])-1)*100
+                          , (exp(BootsTest[[3]])-1)*100, nrow(sdata), unique(sdata$StudyID) %>% length )
+  colnames(Boots_outputs) <- c("Term", "Treatment", "Low", "Mean", "High", "obs", "n_study")
+  return(Boots_outputs)
+}
+
+# This is the function for linear regression
+SLR_yield <- function (sdata, var_subgroup) {
+  pdf( paste0('outputs/SLR_yield_', var_subgroup, ".pdf"), width=8, height=6)
+  par( mar=c(2, 0.2, 0.2, 0.2)
+       , mai=c(0.6, 0.7, 0.0, 0.1)  # by inches, inner margin
+       , omi = c(0.0, 0.1, 0.4, 0.1)  # by inches, outer margin
+       , mgp = c(0.5, 0.5, 0) # set distance of axis
+       , tcl = 0.4
+       , cex.axis = 1.0
+       # , las = 1
+       , mfrow=c(2,2))
+  
+  ncol <- which(colnames(sdata) == 'Yield_C')
+  respcol <- c(which(colnames(sdata) == 'BiomassCash_C'),
+               seq(which(colnames(sdata) == 'BD_C'),which(colnames(sdata) == 'OC_C'),5),
+               seq(which(colnames(sdata) == 'N_C'),which(colnames(sdata) == 'MBN_C'),5)) # all response columns
+  
+  n_results <- data.frame()
+  
+  for (i in 1: length(respcol)) {
+    subdata <- sdata[, c(which(colnames(sdata) == 'StudyID'|colnames(sdata) == 'ExperimentID')
+                                , ncol, ncol + 1, respcol[i], respcol[i]+1 )]
+    
+    indicator <- colnames(subdata)[6] 
+    indicator <- str_sub(indicator, 1, str_length(indicator)-2)
+    
+    colnames(subdata) <- c("StudyID", "ExperimentID",  "Yield_C", "Yield_T", "Y_C", "Y_T")
+    
+    subdata <- subdata %>% filter(!is.na(Yield_C) & !is.na(Y_C) & !is.na(Y_T))
+    # min(subdata$Yield_C)
+    # min(subdata$Yield_T)
+    subdata$Yield_C <- ifelse(subdata$Yield_C == 0, 0.001, subdata$Yield_C)
+    subdata$Yield_T <- ifelse(subdata$Yield_T == 0, 0.001, subdata$Yield_T)
+    
+    subdata$Y_C <- ifelse(subdata$Y_C == 0, 0.001, subdata$Y_C)
+    subdata$Y_T <- ifelse(subdata$Y_T == 0, 0.001, subdata$Y_T)
+    
+    ## aggregation -- updated for revision
+    subdata %>% 
+      group_by(StudyID, ExperimentID) %>% 
+      summarise_each(funs = mean, Yield_C, Yield_T, Y_C, Y_T) -> subdata
+      
+    
+    n_total <- nrow(subdata)
+    n_study <- length(unique(subdata$StudyID))
+    
+    if (n_total > 5) {
+      subdata %>% mutate(log_x = log(Y_T)-log(Y_C), y = log(Yield_T) - log(Yield_C),
+                         x = Y_T / Y_C) -> subdata
+      
+      # plot logRR(yield) vs RR(factor)
+      plot (subdata$y ~ subdata$x
+            , xlab = ""
+            , ylab = ""
+            , pch = c(19) 
+            , main = ""
+            , col = c("gray")
+            , data = subdata
+            , las = 1)
+      mtext(side = 1, text = paste0(indicator, " (RR)"), line = 2.0, cex=1.25, outer = F)
+      mtext(side = 2, text = "Yield (logRR)", line = 2.5, cex=1.25, outer = F)
+      
+      # SLR model for factor with log transfer
+      logSLR <- try(lm(y ~ log_x, data = subdata)) # error handle
+      if (is(logSLR, "try-error")){
+        log_intercept_a <- NA
+        log_slope_b <- NA
+        log_p_slope_b <- NA
+        log_SLR_R2 <- NA }
+      
+      else {
+        log_intercept_a <- summary(logSLR)$coefficients[1,1] %>% round(6)
+        log_try_slope_b <- try(summary(logSLR)$coefficients[2,1]) 
+        if (is(log_try_slope_b, "try-error")) {log_slope_b <- NA} else(log_slope_b <- summary(logSLR)$coefficients[2,1] %>% round(6))
+        if (is(log_try_slope_b, "try-error")) {log_p_slope_b <- NA} else(log_p_slope_b <- summary(logSLR)$coefficients[2,4] %>% round(6))
+        log_SLR_R2 <- summary(logSLR)$r.squared %>% round(6)
+        if (is(log_try_slope_b, "try-error")) {log_student_res <- NA} else(subdata$log_student_res = rstandard(logSLR))
+        if (is(log_try_slope_b, "try-error")) {predict_yield_log <- NA} else(subdata$predict_yield_log = predict(logSLR))
+      }
+      
+      # SLR model for factor without log transfer
+      SLR <- try(lm(y ~ x, data = subdata)) # error handle
+      if (is(SLR, "try-error")){
+        intercept_a <- NA
+        slope_b <- NA
+        p_slope_b <- NA
+        SLR_R2 <- NA }
+      
+      else {
+        intercept_a <- summary(SLR)$coefficients[1,1] %>% round(6)
+        try_slope_b <- try(summary(SLR)$coefficients[2,1]) 
+        if (is(try_slope_b, "try-error")) {slope_b <- NA} else(slope_b <- summary(SLR)$coefficients[2,1] %>% round(6))
+        if (is(try_slope_b, "try-error")) {p_slope_b <- NA} else(p_slope_b <- summary(SLR)$coefficients[2,4] %>% round(6))
+        SLR_R2 <- summary(SLR)$r.squared %>% round(6)
+        if (is(log_try_slope_b, "try-error")) {student_res <- NA} else(subdata$student_res = rstandard(SLR))
+        if (is(log_try_slope_b, "try-error")) {predict_yield <- NA} else(subdata$predict_yield = predict(SLR))
+      }
+      
+      model_prems <- data.frame(indicator, n_total, n_study, intercept_a, slope_b, p_slope_b, SLR_R2, 
+                                log_intercept_a, log_slope_b, log_p_slope_b, log_SLR_R2)
+      n_results <- rbind(n_results, model_prems)
+      
+      # add regression line
+      if(p_slope_b < 0.05 & !is.na(p_slope_b)) {
+        curve(intercept_a + slope_b * x, min(subdata$x), 
+              max(subdata$x), col = "black", lwd = 2, add = T)} 
+      # else{next}
+      
+      ## plot residuals (raw)
+      plot (subdata$student_res ~ subdata$predict_yield
+            , xlab = ""
+            , ylab = ""
+            , pch = c(19) 
+            , main = ""
+            , col = c("black")
+            , data = subdata
+            , las = 1)
+      abline(h = 0, col = "red", lty = 2)
+      mtext(side = 1, text = paste0("Predicted yield", " (RR)"), line = 2.0, cex=1.25, outer = F)
+      mtext(side = 2, text = "Standard residuals", line = 2.5, cex=1.25, outer = F)
+      
+      
+      # plot logRR(yield) vs logRR(factor)
+      plot (subdata$y ~ subdata$log_x
+            , xlab = ""
+            , ylab = ""
+            , pch = c(19) 
+            , main = ""
+            , col = c("gray")
+            , data = subdata
+            , las = 1)
+      mtext(side = 1, text = paste0(indicator, " (logRR)"), line = 2.0, cex=1.25, outer = F)
+      mtext(side = 2, text = "Yield (logRR)", line = 2.5, cex=1.25, outer = F)
+      
+      # add regression line
+      if(log_p_slope_b < 0.05 & !is.na(log_p_slope_b)) {
+        curve(log_intercept_a + log_slope_b * x, min(subdata$log_x), 
+              max(subdata$log_x), col = "black", lwd = 2, add = T)} 
+      # else{next}
+      
+      ## plot residuals (log)
+      plot (subdata$log_student_res ~ subdata$predict_yield_log
+            , xlab = ""
+            , ylab = ""
+            , pch = c(19) 
+            , main = ""
+            , col = c("black")
+            , data = subdata
+            , las = 1)
+      abline(h = 0, col = "red", lty = 2)
+      mtext(side = 1, text = paste0("Predicted yield", " (logRR)"), line = 2.0, cex=1.25, outer = F)
+      mtext(side = 2, text = "Standardized residuals", line = 2.5, cex=1.25, outer = F)
+      
+    }
+  }
+  dev.off()
+  n_results$improved_R2 = (n_results$log_SLR_R2 - n_results$SLR_R2)/n_results$SLR_R2 * 100 %>% round(3)
+  return(n_results)
+}
+
+
+
+# function for normal distribution test and visulization
+plot_norm <- function(sdata) {
+  sdata %>% 
+    ggplot(aes(yi)) + 
+    geom_histogram(fill = "gray", col = "black") +
+    stat_function(fun = dnorm,
+                  args = list(mean = mean(sdata$yi, na.rm = TRUE),
+                              sd = sd(sdata$yi, na.rm = T)),
+                  col = "red",
+                  alpha = 0) +
+    labs(x = "Log ratio of means",
+         y = "Count") -> plot_normal
+  
+  sdata %>% 
+    ggplot(aes(sample = yi)) +
+    stat_qq() + 
+    stat_qq_line() +
+    labs(x = "Normal theoretical quantile",
+         y = "Normal data quantile") -> plot_qq
+  
+  plot_normal / plot_qq -> plot_normal
+  return(plot_normal)
+}
+
+# plot world map
+word_bkgd <- function (sdata) {
+  ggplot(data = sdata) + 
+    # geom_polygon(aes(x = long, y = lat , fill = region , group = group, alpha = 0.1), color = "white") + 
+    geom_polygon(aes(x = long, y = lat, group = group, alpha = 0.1), color = "white", fill = "gray") + 
+    coord_fixed(1.3) +
+    theme(axis.text.y   = element_text(size = 12),
+          axis.text.x   = element_text(size = 12),
+          axis.title = element_blank(),
+          # axis.title.y   = element_text(size = 13, margin = margin(t = 0, r = 12, b = 0, l = 0)),
+          # axis.title.x   = element_text(size = 13, margin = margin(t = 12, r = 0, b = 0, l = 0)),
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          axis.line = element_line(colour = "black"),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1))+
+    theme(legend.position = "none")+
+    scale_x_continuous(name = "Longitude", breaks = seq(-180, 180, 60),
+                       labels = seq(-180, 180, 60)) +
+    scale_y_continuous(name = "Latitude", limits = c(-60, 90), breaks = seq(-90, 90, 30),
+                       labels = seq(-90,90,30))
+}
+
+```
+
+## load data
+```{r load data}
+SoilHealthDB <- read.csv('data/SoilHealthDB_V2.csv', header = T)
+climate_koeppon <- read.table("data/Koeppen-Geiger-ASCII.txt", header = T)
+
+# Add soil depth group
+# sort(unique(as.character(SoilHealthDB$SamplingDepth)))
+SoilHealthDB %>% 
+  mutate(DepthGroup = case_when(SamplingDepth %in% c("0-to-1.5","0-to-10","0-to-12","0-to-15","0-to-18",
+                                                     "0-to-2.5","0-to-20","0-to-21.3","0-to-23.5","0-to-24",
+                                                     "0-to-25","0-to-26","0-to-28","0-to-3","0-to-30","0-to-30.5",
+                                                     "0-to-5","0-to-7.5","0-to-8","10-to-15","10-to-20","10-to-30",
+                                                     "12-to-16","15-to-20","15-to-25","15-to-30","18-to-27",
+                                                     "2-to-20","2-to-7","2.5-to-5","20-to-30","4-to-8","5-to-10",
+                                                     "5-to-15","5-to-20","5-to-7.5","6-to-13",
+                                                     "7.5-to-10","7.5-to-15") ~ "Surface",
+                                SamplingDepth %in% c("20-to-40","20-to-70","21-to-80","25-to-35","25-to-50","18-to-36",
+                                                     "0-to-100","0-to-120","0-to-122","0-to-150","0-to-35","0-to-40",
+                                                     "0-to-45","0-to-47.5","0-to-60","0-to-75","0-to-90",
+                                                     "15-to-75") ~ "Other",
+                                SamplingDepth %in% c("Not-available", "") ~ "Not-available",
+                                TRUE ~ "Subsurface")) -> SoilHealthDB
+
+# Add soiltexture_group information
+sort(unique(as.character(SoilHealthDB$Texture)))
+# coarse group
+SoilHealthDB %>% mutate(TextureGroup = case_when(Texture=="TU"|Texture=="TH"|Texture=="EH"|Texture=="Loamy sand"|Texture=="Sandy loam"|Texture=="Sand"|Texture=="Sandy" ~ "Coarse",
+                        Texture=="Sandy clay loam"|Texture=="Loam"|Texture=="Silt loam"|Texture=="Silt" ~ "Medium",
+                        Texture=="EHI"|Texture=="TA"|Texture=="Clay"|Texture=="Silty clay"|Texture=="Silty clay loam"|Texture=="Clay loam"|Texture=="Sandy clay" ~ "Fine",
+                        TRUE~"NotAvailable")) -> SoilHealthDB
+# test results
+SoilHealthDB %>% dplyr::select (Texture, TextureGroup) %>% filter(TextureGroup == "NotAvailable") %>% distinct(Texture)
+unique(SoilHealthDB[which((SoilHealthDB$Texture=="")),]$TextureGroup)
+
+# Modify Cover crop group
+SoilHealthDB$CoverCropGroup %>% unique()
+SoilHealthDB %>% 
+  mutate(CoverCropGroup = case_when(CoverCropGroup %in% c("Rye", "Grass", "LL") ~ "Grass",
+                                    CoverCropGroup %in% c("Legume") ~ "Legume",
+                                    CoverCropGroup %in% c("Brassica", "Broadleaf", "Broadleaf/Brassica", "BG") ~ "Broadleaf",
+                                    CoverCropGroup %in% c("LG", "MOT") ~ "LG",
+                                    CoverCropGroup %in% c("No") ~ "No CC",
+                                    CoverCropGroup %in% c("AVG", "Mixed") ~ "MTT",
+                                    TRUE ~ "Not available")) -> SoilHealthDB
+
+# Create conservation group
+SoilHealthDB$Conservation_Type %>% unique()
+SoilHealthDB %>% 
+  mutate(ConservationGroup = case_when(Conservation_Type %in% c("CC") ~ "CC",
+                                       Conservation_Type %in% c("AF") ~ "AF",
+                                       Conservation_Type %in% c("OF") ~ "OF",
+                                       Conservation_Type %in% c("NT", "RT") ~ "NTRT",
+                                       Conservation_Type %in% c("IN", "RO", "PF", "RD", "ST", "SR") ~ "Others",
+                                       Conservation_Type %in% c("CC-NT", "OF-CC", "OF-NT", "NT-SR") ~ "Mixed",
+                                       TRUE ~ "Not available" )) -> SoilHealthDB
+
+SoilHealthDB %>% count(ConservationGroup)
+
+# Create cash crop group
+SoilHealthDB$GrainCropGroup %>% unique()
+SoilHealthDB %>% 
+  mutate(GrainCropGroup = case_when(GrainCropGroup %in% c("") ~ "Not available",
+                                    GrainCropGroup %in% c("Soybean") ~ "Soybean",
+                                    GrainCropGroup %in% c("Corn", "Maize") ~ "Corn",
+                                    GrainCropGroup %in% c("Wheat") ~ "Wheat",
+                                    GrainCropGroup %in% c("Sorghum") ~ "Sorghum",
+                                    GrainCropGroup %in% c("Vegetable") ~ "Vegetable",
+                                    GrainCropGroup %in% c("Orchard") ~ "Orchard",
+                                    GrainCropGroup %in% c("CO", "CS", "CV", "CSW", "CWO", "WO", "CW", "CSO", "CVO", "WV") ~ "Mixture",
+                                    GrainCropGroup %in% c("MOT", "MTT", "AVG") ~ "Mixture",
+                                    TRUE ~ "Others")) -> SoilHealthDB
+
+SoilHealthDB %>% count(GrainCropGroup)
+
+
+# Left join and get climate classfication information
+# Add climate information (because koeppen climate data is in 0.5 resolution, we need to re-scale latitude and longitude to 0.5)
+SoilHealthDB$Latitude_mod <- round(SoilHealthDB$Latitude/0.5)*0.5 + ifelse ((SoilHealthDB$Latitude - round(SoilHealthDB$Latitude/0.5)*0.5)>0, 0.25, -0.25 )
+SoilHealthDB[, c(which(colnames(SoilHealthDB)=="Latitude"), which(colnames(SoilHealthDB)=="Latitude_mod"))]
+
+SoilHealthDB$Longitude_mod <- round(SoilHealthDB$Longitude/0.5)*0.5 + ifelse ((SoilHealthDB$Longitude - round(SoilHealthDB$Longitude/0.5)*0.5)>0, 0.25, -0.25 )
+SoilHealthDB[, c(which(colnames(SoilHealthDB)=="Longitude"), which(colnames(SoilHealthDB)=="Longitude_mod"))]
+
+head(SoilHealthDB)
+# load climate coppen data
+
+head(climate_koeppon)
+colnames(climate_koeppon) <- c("Latitude_mod", "Longitude_mod", "Climate_Coeppon")
+
+# left Join
+SoilHealthDB <- merge(x = SoilHealthDB, y = climate_koeppon, by = c("Latitude_mod", "Longitude_mod"), all.x = TRUE)
+
+# Re-group climate
+SoilHealthDB %>% 
+  mutate(Top_Climate = case_when(
+    Climate_Coeppon %in% c("Af", "Am", "As", "Aw") ~ "Tropic",
+    Climate_Coeppon %in% c("BSk", "BSh", "BWh") ~ "Arid",
+    Climate_Coeppon %in% c("Cfa", "Cfb", "Csa", "Csb", "Cwa", "Cwb") ~ "Temperate",
+    Climate_Coeppon %in% c("Dfa", "Dfb", "Dfc", "Dwa", "Dwb") ~ "Boreal",
+    TRUE ~ "NotAvailable")) -> SoilHealthDB
+
+SoilHealthDB %>% count(Top_Climate)
+SoilHealthDB %>% filter(Top_Climate == "Others") %>%  count(Climate_Coeppon)
+
+# sub data with Yield_T is not NULL
+sub_data <- filter(SoilHealthDB, !is.na(Yield_C) & Yield_C > 0 )
+# check if all Yield_T and Yield_C > 0 
+sub_data$Yield_T %>% min()
+sub_data$Yield_C %>% min()
+sub_data$yi <- log(sub_data$Yield_T) - log(sub_data$Yield_C)
+
+sub_data$X2.Yield_Comments %>% unique()
+sub_data %>% filter(X2.Yield_Comments %!in% c("kg per vine ", "need check units")) -> sub_data
+
+```
+
+## aggregate data
+```{r}
+# All data
+## aggregate first ## updated for revision
+sub_data %>% 
+  dplyr::select(StudyID, ExperimentID, Top_Climate, TextureGroup, ConservationGroup, CoverCropGroup, GrainCropGroup, yi) %>% 
+  group_by(StudyID, ExperimentID, Top_Climate, TextureGroup, ConservationGroup, CoverCropGroup, GrainCropGroup) %>% 
+  summarise(yi = mean(yi)) -> sum_all
+```
+
+
+```{r check sub-group}
+sub_data %>% count(Conservation_Type) 
+sub_data %>% count(CoverCropGroup)
+sub_data %>% count(TextureGroup)
+sub_data %>% count(SamplingDepth)
+sub_data %>% count(StudyID)
+sub_data$GrainCropGroup %>% unique()
+```
+
+
+## plot sites map
+```{r sites map}
+sub_data %>% 
+  dplyr::select(YearPublication, Latitude, Longitude, ConservationGroup) %>% 
+  na.omit() %>% 
+  group_by(Latitude, Longitude, ConservationGroup) %>% 
+  summarise(Obs = n()) %>% 
+  filter(ConservationGroup %!in% c("Others", "Not available")) %>% 
+  rename("Conservation" = "ConservationGroup") -> siteInfor
+
+# plot global site map
+counties <- map_data("world", region = ".", exact = FALSE)
+
+map_1 <- ggplot(data = counties) + 
+  geom_polygon(aes(x = long, y = lat, group = group),
+               color = "white",
+               fill = 'gray') + 
+  guides(fill=FALSE) +
+  geom_point(data = siteInfor,
+             aes(x=Longitude, y=Latitude,
+                 size = Obs,
+                 shape = Conservation,
+                 col = Conservation),
+             alpha = 0.75,
+             stroke = 1.5) +
+  scale_x_continuous(name="Longitude", breaks=seq(-180,180, 60),labels = seq(-180,180, 60))+
+  scale_y_continuous(limits = c(-60, 90),name="Latitude", breaks=seq(-60,90,30),labels = seq(-60,90,30)) +
+  scale_size_continuous(name = "Obs (n)") 
+map_1
+ggsave("outputs/Figure 1. Sites distribution.png", width = 8, height = 4, dpi = 300, units = "in" )
+```
+
+## plot normal distribution
+```{r check normal distribution}
+# sub_data %>% plot_norm() ->plot_normal
+sub_data %>% 
+  mutate(yi=Yield_T/Yield_C) %>%
+  dplyr::select(StudyID, ExperimentID, Top_Climate, TextureGroup, ConservationGroup, CoverCropGroup, GrainCropGroup,yi) %>% group_by(StudyID, ExperimentID, Top_Climate, TextureGroup, ConservationGroup, CoverCropGroup, GrainCropGroup) %>%
+  summarise(yi = mean(yi))  -> sum_all_nolg
+sum_all_nolg %>% plot_norm()->plot_norm_nolg
+sum_all %>% plot_norm()->plot_norm_lg
+plot_norm_nolg | plot_norm_lg -> plot_normal
+plot_normal + plot_annotation(tag_levels = 'a')
+# ggsave("outputs/Figure 1_lg-nolg. Normal_check.png", width = 8, height = 6, dpi = 300, units = "in")
+
+sum_all %>% plot_norm() -> norm_all
+sum_all %>% filter(TextureGroup == "Coarse") %>% plot_norm() -> norm_corse
+sum_all %>% filter(TextureGroup == "Fine") %>% plot_norm() -> norm_fine
+sum_all %>% filter(TextureGroup == "Medium") %>% plot_norm() -> norm_Medium
+
+norm_corse | norm_Medium | norm_fine -> plot_normal
+plot_normal + plot_annotation(tag_levels = 'a')
+
+shapiro.test(sum_all$yi)
+# ggsave("outputs/Figure 2. Normal_check.png", width = 8, height = 6, dpi = 300, units = "in")
+```
+
+
+## Evaluate whether a factor should be log transfered - updated for revision
+```{r, fig.width=7, fig.height=9}
+## create a function to test normal distribution (RR vs logRR)
+factor_normal_test <- function(sdata, factor_C, factor_T, x_label) {
+  factor_C <- enquo(factor_C)
+  factor_T <- enquo(factor_T)
+  
+  sdata %>% 
+    dplyr::select(StudyID, ExperimentID, Top_Climate, TextureGroup, ConservationGroup,
+                  CoverCropGroup, GrainCropGroup, !!factor_C, !!factor_T, Yield_C, Yield_T) -> sdata 
+  
+  colnames(sdata) = c('StudyID', 'ExperimentID', 'Top_Climate', 'TextureGroup', 'ConservationGroup',
+                  'CoverCropGroup', 'GrainCropGroup', 'factor_C', 'factor_T', 'Yield_C', 'Yield_T')
+  
+  sdata %>% filter(!is.na(factor_C) & !is.na(factor_T)) %>% 
+    mutate(RR = factor_T / factor_C, logRR = log(factor_T / factor_C),
+           RR_yield = Yield_T/Yield_C, logRR_yield = log(Yield_T/Yield_C)) -> sdata
+  
+  sdata %>% 
+    group_by(StudyID, ExperimentID, Top_Climate, TextureGroup, ConservationGroup, CoverCropGroup, GrainCropGroup) %>% 
+    summarise(RR = mean(RR), logRR = mean(logRR),
+              RR_yield = mean(RR_yield), logRR_yield = mean(logRR_yield)) -> sdata
+  
+  sdata %>% 
+    ggplot(aes(RR)) + 
+    geom_histogram(fill = "gray", col = "black") +
+    labs(x = paste0("Response ratio of ", x_label),
+         y = "Count") -> norm_RR
+  
+  sdata %>% 
+    ggplot(aes(sample = RR)) +
+    stat_qq() + 
+    stat_qq_line() +
+    labs(x = "Normal theoretical quantile",
+         y = "Normal data quantile") -> qq_RR
+  
+  sdata %>% 
+      ggplot(aes(logRR)) + 
+      geom_histogram(fill = "gray", col = "black") +
+      labs(x = paste0("Log (response ratio of ", x_label, " )"),
+           y = "Count") -> normal_logRR
+    
+  sdata %>% 
+    ggplot(aes(sample = logRR)) +
+    stat_qq() + 
+    stat_qq_line() +
+    labs(x = "Normal theoretical quantile",
+         y = "Normal data quantile") -> qq_logRR
+  
+  sdata %>% 
+    ggplot(aes(y=logRR_yield, x = RR)) +
+    geom_point() -> scattle_plot
+  
+   sdata %>% 
+    ggplot(aes(y=logRR_yield, x = logRR)) +
+    geom_point() -> scattle_plot_log
+   
+   ## do SLR
+   slr_raw <- lm(sdata$logRR_yield ~ sdata$RR)
+   sdata$student_res = rstandard(slr_raw)
+   sdata$predict_yield = predict(slr_raw)
+   
+   sdata %>% 
+     ggplot(aes(y = student_res, x = predict_yield)) +
+     geom_point() +
+     geom_hline(yintercept = 0) -> residual_plot_raw
+   
+   ## do SLR for log transfered data
+   slr_log <- lm(sdata$logRR_yield ~ sdata$logRR)
+   sdata$student_res_log = rstandard(slr_log)
+   sdata$predict_yield_log = predict(slr_log)
+   
+   sdata %>% 
+     ggplot(aes(y = student_res_log, x = predict_yield_log)) +
+     geom_point() +
+     geom_hline(yintercept = 0) -> residual_plot_log
+   
+   sdata %>% 
+     ggplot(aes(y = student_res, x = predict_yield)) +
+     geom_point() +
+     geom_hline(yintercept = 0) -> residual_plot_raw
+  
+  (norm_RR / qq_RR / scattle_plot / residual_plot_raw) | (normal_logRR / qq_logRR / scattle_plot_log / residual_plot_log) -> plot_normal
+  plot_normal + plot_annotation(tag_levels = "a") 
+}
+
+pdf( paste0('outputs/normal_test_all', ".pdf"), width=6, height=10)
+factor_normal_test(sub_data, "Aggre_C", "Aggre_T", "aggregation")
+factor_normal_test(sub_data, "AWHC_C", "AWHC_T", "AWHC")
+factor_normal_test(sub_data, "BD_C", "BD_T", "bulk density")
+factor_normal_test(sub_data, "BS_C", "BS_T", "BS")
+factor_normal_test(sub_data, "pH_C", "pH_T", "pH")
+dev.off()  
+
+```
+
+
+## bootstrap
+```{r bootstrap}
+set.seed(1234567)
+n_rep <- 10000
+
+boots_outputs <- boosting_yield(sum_all, "All data", "All")
+boosting_yield(sub_data, "All data", "All")
+
+# by climate
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, Top_Climate == "Tropic"), "Climate", "Tropic"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, Top_Climate == "Arid"), "Climate", "Arid"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, Top_Climate == "Temperate"), "Climate", "Temperate"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, Top_Climate == "Boreal"), "Climate", "Boreal"))
+
+# By soil texture
+sub_data$TextureGroup %>% unique()
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, TextureGroup == "Coarse"), "Texture", "Coarse"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, TextureGroup == "Medium"), "Texture", "Medium"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, TextureGroup == "Fine"), "Texture", "Fine"))
+# boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, TextureGroup == "NotAvailable"), "Texture", "NotAvailable"))
+
+# By ConservationGroup
+SoilHealthDB %>% count(ConservationGroup)
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "AF"), "Conservation", "AF"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "CC"), "Conservation", "CC"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "NTRT"), "Conservation", "NTRT"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "OF"), "Conservation", "OF"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "Others"), "Conservation", "Others"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "Mixed"), "Conservation", "Mixed"))
+
+# By cover crop
+sub_data$CoverCropGroup %>% unique()
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "CC" & CoverCropGroup == "Grass"), "CC", "Grass"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "CC" & CoverCropGroup == "Legume"), "CC", "Legume"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "CC" & CoverCropGroup == "LG"), "CC", "LG"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "CC" & CoverCropGroup == "Broadleaf"), "CC", "Broadleaf"))
+boots_outputs <- bind_rows(boots_outputs, boosting_yield(subset(sum_all, ConservationGroup == "CC" & CoverCropGroup == "MTT"), "CC", "MTT"))
+
+# cash crop
+boots_cashCrop <- boosting_yield(subset(sub_data, GrainCropGroup == "Corn"), "CashCrop", "Corn")
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Orchard"), "CashCrop", "Orchard"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Soybean"), "CashCrop", "Soybean"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Sorghum"), "CashCrop", "Sorghum"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Vegetable"), "CashCrop", "Vegetable"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Wheat"), "CashCrop", "Wheat"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Mixture"), "CashCrop", "Mixture"))
+```
+
+## Plot boots results
+```{r Plot boots results, fig.height=7, fig.width=9}
+boots_outputs %>%
+  filter(Term %in% c("All data", "Climate", "Texture")) -> boots_climateGroup
+
+boots_outputs %>%
+  filter(Term %in% c("Conservation")) -> boots_Conservation
+
+boots_outputs %>%
+  filter(Term %in% c("CC")) -> boots_CC
+
+# plot climate group
+boots_climateGroup %>%
+  mutate(y = c(9, 7.5, 6.5, 5.5, 4.5, 3, 2, 1)) %>%
+  ggplot(aes(Mean, y)) +
+  geom_point(pch = c(12, 16,16,16,16, 10,10,10),
+             size = 2.5) +
+  geom_point(aes(Low, y), pch = "|", size = 2.5) +
+  geom_point(aes(High, y), pch = "|", size = 2.5) +
+  geom_segment(aes(x = Low, y = y, xend = High, yend = y), colour = "black", size = 1.0) +
+  geom_vline(xintercept = 0, linetype="dashed",
+             color = "red", size=1) +
+  geom_hline(yintercept = c(8.25, 3.75), linetype="solid",
+             color = "gray") +
+  labs(x = expression(Response~('% changes'))) +
+  theme(axis.title.y = element_blank()) +
+  scale_y_continuous(breaks = c(9, 7.5, 6.5, 5.5, 4.5, 3, 2, 1),
+                     labels = c("All", "Tropic", "Arid", "Temperate", "Boreal", "Coarse", "Medium", "Fine")) +
+  geom_text(x=rep(48,8),
+            y=c(9, 7.5, 6.5, 5.5, 4.5, 3, 2, 1),
+            label=paste0(boots_climateGroup$obs,"/",boots_climateGroup$n_study),
+            size = 3.5,
+            hjust = 0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  xlim(c(-40, 65)) -> plot_boots_soil
+
+# Plot cash crop
+boots_cashCrop %>%
+  mutate(y = c(7,6,5,4,3,2,1)) %>%
+  ggplot(aes(Mean, y)) +
+  geom_point(pch = 17,
+             size = 2.5) +
+  geom_point(aes(Low, y), pch = "|", size = 2.5) +
+  geom_point(aes(High, y), pch = "|", size = 2.5) +
+  geom_segment(aes(x = Low, y = y, xend = High, yend = y), colour = "black", size = 1.0) +
+  geom_vline(xintercept = 0, linetype="dashed",
+             color = "red", size=1) +
+  labs(x = expression(Response~('% changes'))) +
+  theme(axis.title.y = element_blank()) +
+  scale_y_continuous(breaks = c(7,6,5,4,3,2,1),
+                     labels = c("Corn", "Mixture", "Orchard", "Soybean", "Sorghum", "Vegetable", "Wheat")) +
+  geom_text(x=rep(55,7),
+            y=c(7,6,5,4,3,2,1),
+            label=paste0(boots_cashCrop$obs,"/",boots_cashCrop$n_study),
+            size = 3.5,
+            hjust = 0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  xlim(c(-20, 70)) -> plot_boots_cashCrop
+
+
+# plot conservation
+boots_Conservation %>%
+  mutate(y = c(6,5,4,3,2,1)) %>%
+  ggplot(aes(Mean, y)) +
+  geom_point(pch = 17,
+             size = 2.5) +
+  geom_point(aes(Low, y), pch = "|", size = 2.5) +
+  geom_point(aes(High, y), pch = "|", size = 2.5) +
+  geom_segment(aes(x = Low, y = y, xend = High, yend = y), colour = "black", size = 1.0) +
+  geom_vline(xintercept = 0, linetype="dashed",
+             color = "red", size=1) +
+  labs(x = expression(Response~('% changes'))) +
+  theme(axis.title.y = element_blank()) +
+  scale_y_continuous(breaks = c(6,5,4,3,2,1),
+                     labels = c("AF", "CC", "Mixed", "NT/RT", "OF", "Others")) +
+  geom_text(x=rep(75,6),
+            y=c(6,5,4,3,2,1),
+            label=paste0(boots_Conservation$obs,"/",boots_Conservation$n_study),
+            size = 3.5,
+            hjust = 0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  xlim(c(-30, 90)) -> plot_boots_conservation
+
+# plot CC
+boots_CC %>%
+  mutate(y = c(5,4,3,2,1)) %>%
+  ggplot(aes(Mean, y)) +
+  geom_point(pch = 18,
+             size = 2.5) +
+  geom_point(aes(Low, y), pch = "|", size = 2.5) +
+  geom_point(aes(High, y), pch = "|", size = 2.5) +
+  geom_segment(aes(x = Low, y = y, xend = High, yend = y), colour = "black", size = 1.0) +
+  geom_vline(xintercept = 0, linetype="dashed",
+             color = "red", size=1) +
+  labs(x = expression(Response~('% changes'))) +
+  theme(axis.title.y = element_blank()) +
+  scale_y_continuous(breaks = c(5,4,3,2,1),
+                     labels = c("Grass", "Legume", "LG", "Broadleaf", "MTT"),
+                     position = "left") +
+  geom_text(x=rep(50,5),
+            y=c(5,4,3,2,1),
+            label=paste0(boots_CC$obs,"/",boots_CC$n_study),
+            size = 3.5,
+            hjust = 0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  xlim(c(-40, 67)) -> plot_boots_cc
+
+(plot_boots_soil | plot_boots_cashCrop) / (plot_boots_conservation | plot_boots_cc) -> plot_boots
+plot_boots + plot_annotation(tag_levels = 'a')
+
+ggsave("outputs/Figure 3_boots_by_group.jpg", width = 9, height = 7, dpi = 300, units = c("in"))
+```
+
+```{r}
+# cash crop
+boots_cashCrop <- boosting_yield(sum_all, "All data", "All")
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Corn"), "CashCrop", "Corn"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Orchard"), "CashCrop", "Orchard"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Soybean"), "CashCrop", "Soybean"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Sorghum"), "CashCrop", "Sorghum"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Vegetable"), "CashCrop", "Vegetable"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Wheat"), "CashCrop", "Wheat"))
+boots_cashCrop <- bind_rows(boots_cashCrop, boosting_yield(subset(sum_all, GrainCropGroup == "Mixture"), "CashCrop", "Mixture"))
+
+```
+
+## Figure 3-version 2
+```{r Figure 2, fig.height=8, fig.width=10}
+pdf("outputs/Figure 2.pdf", width = 10, height = 8)
+
+par( mar=c(2, 0.2, 0.2, 0.2)
+     , mai=c(0.25, 0.25, 0.1, 0.1)  # by inches, inner margin
+     , omi = c(0.5, 1.5, 0.1, 1.5)  # by inches, outer margin
+     , mgp = c(0.3, 0.3, 0) # set distance of axis
+     , tcl = 0.4
+     # , cex.axis = 1.0
+     , mfrow=c(2,2))
+
+## plot cashcrop
+boots_cashCrop$ID <- c(9,7,6,5,4,3,2,1)
+boots_cashCrop$pch <- c(16,16,16,16,16,16,16,16)
+boots_cashCrop$col <- c("orange","black","black","black","black","black","black","black")
+
+x_min <- min(boots_climateGroup$Low, na.rm = T)
+x_max <- 60
+
+plot(boots_cashCrop$ID ~ boots_cashCrop$Mean, lwd=2
+     # ,xlim=c(0,21),ylim=c(1,16)
+     , las=1
+     , xaxt='n', yaxt='n'
+     , xlim = c(x_min, x_max)
+     , ylim = c(0.5, 9.5)
+     , xlab = '', ylab='', main=''
+     , col = boots_cashCrop$col
+     , pch = boots_cashCrop$pch
+     , cex = 1 
+     , xaxs="i"
+)
+
+arrows(boots_cashCrop$Low, boots_cashCrop$ID, boots_cashCrop$High, boots_cashCrop$ID
+       ,code=3,length=0.05,angle=90,boots_cashCrop$col,lwd=2)
+
+abline(v=0, col="red", lty=2, lwd=2)
+abline(h=c(8), col="black", lty=3, lwd=2)
+
+axis (side = 1, at = seq(-20, 60, 10), labels = seq(-20, 60, 10)
+      , cex=1
+      , las = 1)
+
+axis (side = 2, at = boots_cashCrop$ID, labels = paste(boots_cashCrop$Treatment, sep = "")
+      , cex=1
+      , las = 2)
+
+# sort(sum_data$High_Perc)
+text(ifelse(boots_cashCrop$High > 50, boots_cashCrop$Low-15, boots_cashCrop$High+2.5), boots_cashCrop$ID
+     , paste(boots_cashCrop$obs,"/",boots_cashCrop$n_study, sep = ""), cex=0.85, adj=0)
+
+text(-20, 9.145, "(a)", cex=1.25, adj=0)
+
+
+# panel (b) By climate and soil texture: meta_II with predicted SD
+boots_outputs %>% 
+  filter(Term %in% c("Climate", "Texture")) -> boots_climateGroup
+
+boots_climateGroup$ID <- c(8,7,6,5,3,2,1)
+boots_climateGroup$pch <- c(16,16,16,16,16,16,16)
+boots_climateGroup$col <- c("blue","blue","blue","blue","red","red","red")
+
+plot(boots_climateGroup$ID ~ boots_climateGroup$Mean, lwd=2
+     # ,xlim=c(0,21),ylim=c(1,16)
+     , las=1
+     , xaxt='n', yaxt='n'
+     , xlim = c(x_min, x_max)
+     , ylim = c(0.5, 8.5)
+     , xlab = '', ylab='', main=''
+     , col = boots_climateGroup$col
+     , pch = boots_climateGroup$pch
+     # , cex = 0.75
+     # , xaxs="i"
+)
+
+arrows(boots_climateGroup$Low, boots_climateGroup$ID, boots_climateGroup$High, boots_climateGroup$ID
+       ,code=3,length=0.05,angle=90,boots_climateGroup$col,lwd=2)
+
+abline(v=0, col="red", lty=2, lwd=2)
+
+
+axis (side = 1, at = seq(-20, 60, 10), labels = seq(-20, 60, 10)
+      , cex=1
+      , las = 1)
+
+axis (side = 4, at = boots_climateGroup$ID, labels = paste(boots_climateGroup$Treatment, sep = "")
+      , cex=1
+      , las = 2)
+
+# sort(sum_data$High_Perc)
+text(ifelse(boots_climateGroup$High > 45, boots_climateGroup$Low-12.5, boots_climateGroup$High+5), boots_climateGroup$ID
+     , paste(boots_climateGroup$obs,"/",boots_climateGroup$n_study, sep = ""), cex=0.85, adj=0)
+
+abline(h=c(4), col="black", lty=3, lwd=2)
+# mtext(side = 1, text = paste("Soil carbon stocks (% changes)", sep=" "), line = 1, cex=1.05, outer = T, adj = 0.7)
+text(-20, 8.175, "(b)", cex=1.25, adj=0)
+
+
+## panel (c) plot conservation
+boots_Conservation$ID <- c(6:1)
+boots_Conservation$pch <- rep(16,6)
+boots_Conservation$col <- c("black","green","black","black","black","black")
+
+plot(boots_Conservation$ID ~ boots_Conservation$Mean, lwd=2
+     # ,xlim=c(0,21),ylim=c(1,16)
+     , las=1
+     , xaxt='n', yaxt='n'
+     , xlim = c(-30, 95)
+     , ylim = c(0.5, 6.5)
+     , xlab = '', ylab='', main=''
+     , col = boots_Conservation$col
+     , pch = boots_Conservation$pch
+     # , cex = 0.75
+     # , xaxs="i"
+)
+
+
+arrows(boots_Conservation$Low, boots_Conservation$ID, boots_Conservation$High, boots_Conservation$ID
+       ,code=3,length=0.05,angle=90,boots_Conservation$col,lwd=2)
+
+abline(v=0, col="red", lty=2, lwd=2)
+
+
+axis (side = 1, at = seq(-30, 95, 15), labels = seq(-30, 95, 15)
+      , cex=1
+      , las = 1)
+
+axis (side = 2, at = boots_Conservation$ID, labels = paste(boots_Conservation$Treatment, sep = "")
+      , cex=1
+      , las = 2)
+
+
+# sort(sum_data$High_Perc)
+text(ifelse(boots_Conservation$High > 50 | boots_Conservation$Treatment == "CC",
+            boots_Conservation$Low-22, boots_Conservation$High+2.5), boots_Conservation$ID
+     , paste(boots_Conservation$obs,"/",boots_Conservation$n_study, sep = ""), cex=0.85, adj=0)
+
+mtext(side = 1, text = paste("Crop yield (% changes)", sep=" "), line = 2, cex=1.05, outer = F, adj = 0.5)
+
+text(-15, 6.3, "(c)", cex=1.25, adj=0)
+
+
+## plot cover crop
+boots_CC$ID <- c(5:1)
+boots_CC$pch <- rep(16,5)
+boots_CC$col <- rep("green",5)
+
+plot(boots_CC$ID ~ boots_CC$Mean, lwd=2
+     # ,xlim=c(0,21),ylim=c(1,16)
+     , las=1
+     , xaxt='n', yaxt='n'
+     , xlim = c(x_min, x_max)
+     , ylim = c(0.5, 5.5)
+     , xlab = '', ylab='', main=''
+     , col = boots_CC$col
+     , pch = boots_CC$pch
+     # , cex = 0.75
+     # , xaxs="i"
+)
+
+
+arrows(boots_CC$Low, boots_CC$ID, boots_CC$High, boots_CC$ID
+       ,code=3,length=0.05,angle=90,boots_CC$col,lwd=2)
+
+abline(v=0, col="red", lty=2, lwd=2)
+
+
+axis (side = 1, at = seq(-20, 60, 10), labels = seq(-20, 60, 10)
+      , cex=1
+      , las = 1)
+
+axis (side = 4, at = boots_CC$ID, labels = paste(boots_CC$Treatment, sep = "")
+      , cex=1
+      , las = 2)
+
+
+# sort(sum_data$High_Perc)
+text(ifelse(boots_CC$High > 50, boots_CC$Low-10, boots_CC$High+2.5), boots_CC$ID
+     , paste(boots_CC$obs,"/",boots_CC$n_study, sep = ""), cex=0.85, adj=0)
+
+text(-20, 5.35, "(d)", cex=1.25, adj=0)
+mtext(side = 1, text = paste("Crop yield (% changes)", sep=" "), line = 2, cex=1.05, outer = F, adj = 0.5)
+
+# ggsave("outputs/Figure 2.jpg", width = 14, height = 8, dpi = 300, units = c("in"))
+
+```
+
+
+
+
+## Regression between Yield change and other index
+```{r regression}
+SLR_yield(sub_data, "all")
+```
+
+
+```{r}
+# SoilHealthDB %>% 
+#   filter(Conservation_Type == "CC" & !is.na(Yield_C)) %>% 
+#   dplyr::select(Yield_C, Yield_T, OC_C, OC_T, N_C, N_T, pH_C, pH_T, SWC_C, SWC_T) ->
+#   sem_data
+```
+
+
+```{r function for radar plot}
+# install.packages('fmsb')
+library(fmsb)
+
+radar_plot <- function(sdata) {
+  rbind(
+    rep(1, nrow(sdata)) , rep(0,nrow(sdata)),
+    sdata %>% 
+      dplyr::select(indicator, SLR_R2) %>% 
+      spread(key = indicator, value = SLR_R2)) -> radar_data
+  
+  # plot
+  radarchart(radar_data %>% dplyr::select(-BiomassCash), # remove some indicators not interested in
+           axistype=6 , vlcex=1.0, cglty=3)
+}
+
+
+# https://zhuanlan.zhihu.com/p/67313787
+
+
+```
+
+
+## Copare tropic and boreal
+```{r climate comparison, fig.height=8, fig.width=8}
+slr_boreal <- SLR_yield(sub_data %>% 
+                         filter(Top_Climate == "Boreal"), "1_Boreal")
+
+slr_tropic <- SLR_yield(sub_data %>% 
+                         filter(Top_Climate == "Tropic"), "1_Tropic")
+
+## Factors intersection of boreal and tropic are ("OC", "N", "P")
+slr_boreal %>% 
+  filter(indicator %in% 
+           c("BiomassCash", "OC", "N", "P")) -> slr_boreal
+
+slr_tropic %>% 
+  filter(indicator %in% 
+           c("BiomassCash", "OC", "N", "P")) -> slr_tropic
+
+# write.csv(slr_boreal, 'E:/1/SoilHealth_Yield/data/slr_boreal.csv')
+# write.csv(slr_tropic, 'E:/1/SoilHealth_Yield/data/slr_tropic.csv')
+
+# no transfered
+slr_boreal %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+slr_tropic %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+
+## Radar plot 
+radar_plot(slr_boreal)
+radar_plot(slr_tropic)
+
+# save radar plot 
+slr_boreal
+pdf( paste0("outputs/Radar1_boreal.pdf"), width=10, height=10)
+radar_plot(slr_boreal)
+dev.off()
+
+slr_tropic
+pdf( paste0("outputs/Radar1_tropic.pdf"), width=10, height=10)
+radar_plot(slr_tropic)
+dev.off()
+# # no factor log transfered
+# slr_boreal %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+# slr_tropic %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+
+```
+
+
+```{r  climate comparison, fig.height=8, fig.width=8}
+# 不用这个
+library(tidyverse)
+library(ggplot2)
+
+set.seed(123456)
+x<-1:54
+x
+y<-sin(3*x*pi/54)
+df<-data.frame(x1=x,
+               y1=abs(y),
+               var=gl(3,18,labels = slr_boreal[2:4, 1]))
+
+df
+
+df_boreal<-data.frame(x=slr_boreal[2:4, 1],
+               y=slr_boreal[2:4, 7])
+df_boreal
+
+df_tropic<-data.frame(x=slr_tropic[2:4, 1],
+               y=slr_tropic[2:4, 7])
+df_tropic
+
+merge(df,df_boreal,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*y) -> df1
+
+merge(df,df_tropic,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*y) -> df2
+
+
+ggplot(data=df1,aes(x=x1,y=new_y))+
+  geom_area(aes(fill=var),
+            alpha=0.8,
+            color="black",
+            show.legend = F)+
+  coord_polar()+
+  # geom_area(data = data.frame(x=1:54,y=1),
+  #           aes(x=x,y=y),
+  #           fill='0',
+  #           alpha=0,
+  #           color="black",
+  #           show.legend = F)+
+  # geom_area(data = data.frame(x=1:54,y=0.75),
+  #           aes(x=x,y=y),
+  #           fill='0',
+  #           alpha=0,
+  #           color="black",
+  #           linetype = "dashed",
+  #           show.legend = F)+
+  geom_area(data = data.frame(x=1:54,y=0.5 ),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0.25),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=1,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  theme_bw()+
+  theme(axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(),
+        axis.title = element_blank())+
+  geom_text(data=df1 %>% filter(y1==1),
+            aes(x=x1,y=y1-0.3,label=var),
+            fontface="italic")+
+  # scale_x_continuous(breaks = seq(2,54,18),
+  #                    labels = df1$y)+
+  # annotate(geom = "text",x=10,y=2,label="Core 10665")+
+  theme(legend.position = "none")
+
+ggplot(data=df2,aes(x=x1,y=new_y))+
+  geom_area(aes(fill=var),
+            alpha=0.8,
+            color="black",
+            show.legend = F)+
+  coord_polar()+
+  # geom_area(data = data.frame(x=1:54,y=1),
+  #           aes(x=x,y=y),
+  #           fill='0',
+  #           alpha=0,
+  #           color="black",
+  #           show.legend = F)+
+  # geom_area(data = data.frame(x=1:54,y=0.75),
+  #           aes(x=x,y=y),
+  #           fill='0',
+  #           alpha=0,
+  #           color="black",
+  #           linetype = "dashed",
+  #           show.legend = F)+
+  geom_area(data = data.frame(x=1:54,y=0.5 ),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0.25),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=1,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  theme_bw()+
+  theme(axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(),
+        axis.title = element_blank())+
+  geom_text(data=df1 %>% filter(y1==1),
+            aes(x=x1,y=y1-0.3,label=var),
+            fontface="italic")+
+  # scale_x_continuous(breaks = seq(2,54,18),
+  #                    labels = df1$y)+
+  # annotate(geom = "text",x=10,y=2,label="Core 10665")+
+  theme(legend.position = "none")
+
+# ggsave("outputs/p1. Sites distribution.png", width = 8, height = 8, dpi = 300, units = "in" )
+```
+
+```{r   climate comparison, fig.height=8, fig.width=8}
+
+library(tidyverse)
+library(ggplot2)
+
+set.seed(123456)
+x<-1:54
+x
+y<-sin(3*x*pi/54)
+df<-data.frame(x1=x,
+               y1=abs(y),
+               var=gl(3,18,labels = slr_boreal[2:4, 1]))
+
+df
+
+df_boreal<-data.frame(x=slr_boreal[2:4, 1],
+               y=slr_boreal[2:4, 7])
+df_boreal
+
+df_tropic<-data.frame(x=slr_tropic[2:4, 1],
+               y=slr_tropic[2:4, 7])
+df_tropic
+
+merge(df,df_boreal,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*(y+0.3)) -> df1
+
+merge(df,df_tropic,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*(y+0.3))-> df2
+
+
+ggplot()+
+  ggnewscale::new_scale_fill()+
+  geom_area(data=df1,aes(x=x1,y=new_y,fill=var),
+            color = "#5E4FA2",
+            fill="#5E4FA2",
+            linetype = "solid",
+            alpha=0.5)+
+  geom_area(data=df2,aes(x=x1,y=new_y,fill=var),
+            color = "#D53E4F", 
+            fill = "#D53E4F", 
+            linetype = "solid",
+            alpha=0.5)+
+  coord_polar()+
+  # geom_area(data = data.frame(x=1:54,y=1.00),
+  #           aes(x=x,y=y),
+  #           fill='0',
+  #           alpha=0,
+  #           color="black",
+  #           show.legend = F)+
+  # geom_area(data = data.frame(x=1:54,y=0.75 ),
+  #           aes(x=x,y=y),
+  #           fill='0',
+  #           alpha=0,
+  #           color="black",
+  #           show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0.8),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "solid",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0.55),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  theme_void()+
+  geom_text(data=df2 %>% filter(y1==1),
+            aes(x=x1,y=y1-0.1,label=var),
+            fontface="italic")
+
+```
+
+```{r   climate comparison, fig.height=8, fig.width=8}
+# yong
+# https://geek-docs.com/r-language/r-tutorials/g_geom_area-plot-with-areas-and-outlines-in-ggplot2-in-r.html
+set.seed(123456)
+x<-1:54
+x
+y<-sin(3*x*pi/54)
+df<-data.frame(x1=x,
+               y1=abs(y),
+               var=gl(3,18,labels = slr_boreal[2:4, 1]))
+
+df
+
+df_boreal<-data.frame(x=slr_boreal[2:4, 1],
+               y=slr_boreal[2:4, 7])
+df_boreal
+
+df_tropic<-data.frame(x=slr_tropic[2:4, 1],
+               y=slr_tropic[2:4, 7])
+df_tropic
+
+merge(df,df_boreal,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*y) -> df1
+
+merge(df,df_tropic,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*y) -> df2
+
+merge(df,df_boreal,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*(y+0.3)) -> df1
+
+merge(df,df_tropic,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*(y+0.3)) -> df2
+
+
+library(ggplot2)
+library(tidyverse)
+
+p_tropic<-ggplot()+
+  geom_area(data = data.frame(x=1:54,y=0.8),
+            aes(x=x,y=y),
+           fill='0',
+           color="black",
+           linetype = "solid",
+           alpha=0,
+           show.legend = F)+
+  ggnewscale::new_scale_fill()+
+  geom_area(data=df1,aes(x=x1,y=new_y,fill=var),
+            color = "#5E4FA2",
+            fill="#5E4FA2",
+            linetype = "solid",
+            alpha=0.5)+
+  geom_area(data=df2,aes(x=x1,y=new_y,fill=var),
+            color = "#D53E4F", 
+            fill = "#D53E4F", 
+            linetype = "solid",
+            alpha=0.5)+
+  scale_fill_manual(values = c("#ff8e54","#f63c50","#0088bf","#77d793",
+                               "#e1f594","#ffffbe","#ffe087"))+
+  coord_polar()+
+  # geom_area(data = data.frame(x=1:54,y=0.85),
+  #           aes(x=x,y=y),
+  #           fill='0',
+  #           alpha=0,
+  #           color="black",
+  #           show.legend = F)+
+  # geom_area(data = data.frame(x=1:54,y=0.6 ),
+  #           aes(x=x,y=y),
+  #           fill='0',
+  #           alpha=0,
+  #           color="black",
+  #           show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0.55),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:54, y=0.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  theme_void()+
+  # scale_x_continuous(breaks = seq(2,54,18),
+  #                    labels = df$x)
+  # geom_text(data=df,aes(x=seq(2,54,18),
+  #                        y=y+0.2,
+  #                        label=y))+
+  geom_text(data=df2 %>% filter(y1==1),
+            aes(x=x1,y=y1,label=var),
+            fontface="italic")
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.2,label=B))+
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.6,label=D))+
+  # annotate(geom = "text",x=10,y=2,label="Core 10665")+
+  # theme(legend.position = "none")
+
+pdf( paste0("outputs/p_tropic.pdf"), width=10, height=10)
+plot(p_tropic)
+dev.off()
+```
+
+
+## Compare soil_group: mediun vs coarse
+```{r medium comparison, fig.height=8, fig.width=8}
+slr_Coarse <- SLR_yield(sub_data %>% 
+                         filter(TextureGroup == "Coarse"), "2_Coarse")
+
+slr_Coarse %>% 
+  filter(indicator %in% 
+           c("BiomassCash", "BD", "OC", "N", "P", "K", "pH", "CEC",   
+             "SWC", "Enzyme", "Nmina", "MBN")) -> slr_Coarse
+
+slr_Medium <- SLR_yield(sub_data %>% 
+                         filter(TextureGroup == "Medium"), "2_Medium")
+
+slr_Medium %>% 
+  filter(indicator %in% 
+           c("BiomassCash", "BD", "OC", "N", "P", "K", "pH", "CEC",   
+             "SWC", "Enzyme", "Nmina", "MBN")) -> slr_Medium
+
+# write.csv(slr_Coarse, 'E:/1/SoilHealth_Yield/data/slr_Coarse.csv') 
+# write.csv(slr_Medium, 'E:/1/SoilHealth_Yield/data/slr_Medium.csv')
+
+# N, P log transfer
+slr_Coarse %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+slr_Medium %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+
+slr_Coarse[slr_Coarse$indicator == "N" | slr_Coarse$indicator == "P", ]$SLR_R2 = 
+  slr_Coarse[slr_Coarse$indicator == "N" | slr_Coarse$indicator == "P", ]$log_SLR_R2
+
+slr_Medium[slr_Medium$indicator == "N" | slr_Medium$indicator == "P", ]$SLR_R2 = 
+  slr_Medium[slr_Medium$indicator == "N" | slr_Medium$indicator == "P", ]$log_SLR_R2
+
+## Radar plot 
+radar_plot(slr_Coarse)
+radar_plot(slr_Medium)
+
+# save radar plot 
+slr_Coarse
+pdf( paste0("outputs/Radar2_Coarse.pdf"), width=10, height=10)
+radar_plot(slr_Coarse)
+dev.off()
+
+slr_Medium
+pdf( paste0("outputs/Radar2_Medium.pdf"), width=10, height=10)
+radar_plot(slr_Medium)
+dev.off()
+```
+
+```{r fig.height=8, fig.width=8}
+set.seed(123456)
+x<-1:198
+x
+y<-sin(11*x*pi/198)
+df<-data.frame(x1=x,
+               y1=abs(y),
+               var=gl(11,18,labels = slr_Coarse[2:12, 1]))
+
+df
+
+df_Coarse<-data.frame(x=slr_Coarse[2:12, 1],
+               y=slr_Coarse[2:12, 7])
+df_Coarse
+
+df_Medium<-data.frame(x=slr_Medium[2:12, 1],
+               y=slr_Medium[2:12, 7])
+df_Medium
+
+# merge(df,df_Coarse,by.x = 'var',by.y = 'x') %>% 
+#   mutate(new_y=y1*y) -> df1
+# 
+# merge(df,df_Medium,by.x = 'var',by.y = 'x') %>% 
+#   mutate(new_y=y1*y) -> df2
+
+merge(df,df_Coarse,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*(y+0.3)) -> df1
+
+merge(df,df_Medium,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*(y+0.3)) -> df2
+
+# p_Medium<-
+  
+  ggplot()+
+  geom_area(data = data.frame(x=1:198,y=1.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            show.legend = F)+
+  ggnewscale::new_scale_fill()+
+  geom_area(data=df1,aes(x=x1,y=new_y,fill=var),
+            fill="red",
+            color ="red",
+            # fill="#8DD3C7",
+            # color ="#8DD3C7",
+            linetype = "solid",
+            alpha=0.5)+
+  geom_area(data=df2,aes(x=x1,y=new_y,fill=var),
+            # fill = "#FDB462",
+            # color = "#FDB462",
+            fill = "blue",
+            color = "blue",
+            linetype = "solid",
+            alpha=0.5)+
+  scale_fill_manual(values = brewer.pal(name="Set3",11))+
+  coord_polar()+
+  geom_area(data = data.frame(x=1:198,y=1.05),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:198,y=0.8),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:198, y=0.55),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:198, y=0.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  theme_void()+
+  # # scale_x_continuous(breaks = seq(2,54,18),
+  #                    labels = df$x)
+  # geom_text(data=df,aes(x=seq(2,54,18),
+  #                        y=y+0.2,
+  #                        label=y))+
+  geom_text(data=df2 %>% filter(y1==1),
+            aes(x=x1,y=y1+0.6,label=var),
+            fontface="italic")
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.2,label=B))+
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.6,label=D))+
+  # annotate(geom = "text",x=10,y=2,label="Core 10665")+
+  # theme(legend.position = "none")
+
+# pdf( paste0("outputs/p_Medium.pdf"), width=10, height=10)
+# plot(p_Medium)
+# dev.off()
+
+```
+
+
+## Compare corn vs others
+```{r radar plot, fig.height=8, fig.width=8}
+slr_Corn <- SLR_yield(sub_data %>% 
+                         filter(GrainCropGroup == "Corn"), "3_Corn")
+# select variables available for Corn,Inter planting,Orchard,Rotation,Soybean,Sorghum,Vegetable,Wheat
+slr_Corn %>% 
+  filter(indicator %in% 
+           c("BiomassCash", "BD", "OC", "N", "P", "K", "pH", "CEC", "Aggre", "Infiltration", "Ksat",   
+             "Erosion", "SWC")) -> slr_Corn
+
+slr_NCorn <- SLR_yield(sub_data %>%
+                           filter(GrainCropGroup != "Corn"), "3_NCorn")
+slr_NCorn %>%
+  filter(indicator %in%
+           c("BiomassCash", "BD", "OC", "N", "P", "K", "pH", "CEC", "Aggre", "Infiltration", "Ksat",   
+             "Erosion", "SWC")) -> slr_NCorn
+
+# write.csv(slr_Corn, 'E:/1/SoilHealth_Yield/data/slr_Corn.csv') 
+# write.csv(slr_NCorn, 'E:/1/SoilHealth_Yield/data/slr_NCorn.csv')
+
+
+# N, P, K need log transfer
+# 修改：N,Aggre
+
+slr_Corn %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+slr_NCorn %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+
+slr_Corn[slr_Corn$indicator == "N" | slr_Corn$indicator == "Aggre", ]$SLR_R2 =
+  slr_Corn[slr_Corn$indicator == "N" | slr_Corn$indicator == "Aggre", ]$log_SLR_R2
+
+slr_NCorn[slr_NCorn$indicator == "N" | slr_NCorn$indicator == "Aggre", ]$SLR_R2 =
+  slr_NCorn[slr_NCorn$indicator == "N" | slr_NCorn$indicator == "Aggre", ]$log_SLR_R2
+
+radar_plot(slr_Corn)
+radar_plot(slr_NCorn)
+
+# save radar plot
+slr_Corn
+pdf( paste0("outputs/Radar3_Corn.pdf"), width=10, height=10)
+radar_plot(slr_Corn)
+dev.off()
+
+slr_NCorn
+pdf( paste0("outputs/Radar3_NCorn.pdf"), width=10, height=10)
+radar_plot(slr_NCorn)
+dev.off()
+
+```
+
+```{r  fig.height=8, fig.width=8}
+set.seed(123456)
+x<-1:180
+x
+y<-sin(10*x*pi/180)
+df<-data.frame(x1=x,
+               y1=abs(y),
+               var=gl(10,18,labels = slr_Corn[c(2:9,12:13), 1]))
+
+df
+
+df_Corn<-data.frame(x=slr_Corn[c(2:9,12:13), 1],
+               y=slr_Corn[c(2:9,12:13), 7])
+df_Corn
+
+df_NCorn<-data.frame(x=slr_NCorn[2:11, 1],
+               y=slr_NCorn[2:11, 7])
+df_NCorn
+
+# merge(df,df_Corn,by.x = 'var',by.y = 'x') %>% 
+#   mutate(new_y=y1*y) -> df1
+# 
+# merge(df,df_NCorn,by.x = 'var',by.y = 'x') %>% 
+#   mutate(new_y=y1*y) -> df2
+
+merge(df,df_Corn,by.x = 'var',by.y = 'x') %>%
+  mutate(new_y=y1*(y+0.3)) -> df1
+
+merge(df,df_NCorn,by.x = 'var',by.y = 'x') %>%
+  mutate(new_y=y1*(y+0.3))-> df2
+
+
+
+p_NCorn<-ggplot()+
+  geom_area(data = data.frame(x=1:180,y=0.8),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "solid",
+            show.legend = F)+
+  ggnewscale::new_scale_fill()+
+  geom_area(data=df1,aes(x=x1,y=new_y,fill=var),
+            fill="#80B1D3",
+            color ="#80B1D3",
+            linetype = "solid",
+            alpha=0.5)+
+  geom_area(data=df2,aes(x=x1,y=new_y,fill=var),
+            fill = "#FCCDE5",
+            color = "#FCCDE5",
+            linetype = "solid",
+            alpha=0.5)+
+  scale_fill_manual(values = brewer.pal(name="Set3",11))+
+  coord_polar()+
+  geom_area(data = data.frame(x=1:180, y=0.55),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:180, y=0.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  theme_void()+
+  # # scale_x_continuous(breaks = seq(2,54,18),
+  #                    labels = df$x)
+  # geom_text(data=df,aes(x=seq(2,54,18),
+  #                        y=y+0.2,
+  #                        label=y))+
+  geom_text(data=df2 %>% filter(y1==1),
+            aes(x=x1,y=y1,label=var),
+            fontface="italic")
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.2,label=B))+
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.6,label=D))+
+  # annotate(geom = "text",x=10,y=2,label="Core 10665")+
+  # theme(legend.position = "none")
+
+pdf( paste0("outputs/p_NCorn.pdf"), width=10, height=10)
+plot(p_NCorn)
+dev.off()
+
+```
+
+
+## Compare AF vs not AF
+```{r radar plot, fig.height=8, fig.width=8}
+slr_AF <- SLR_yield(sub_data %>% 
+                         filter(ConservationGroup == "AF"), "4_AF")
+# select variables available for AF,CC,Mixed,NT/RT,OF and Others
+slr_AF %>% 
+  filter(indicator %in% 
+           c("BiomassCash", "OC", "N", "P", "K", "pH", "CEC", "Erosion")) -> slr_AF
+
+slr_NAF <- SLR_yield(sub_data %>% 
+                         filter(ConservationGroup != "AF"), "4_NAF")
+
+slr_NAF %>% 
+  filter(indicator %in% 
+           c("BiomassCash", "OC", "N", "P", "K", "pH", "CEC", "Erosion")) -> slr_NAF
+
+
+# write.csv(slr_AF, 'E:/1/SoilHealth_Yield/data/slr_AF.csv') 
+# write.csv(slr_NAF, 'E:/1/SoilHealth_Yield/data/slr_NAF.csv') 
+
+# N need log transfer
+# 修改：只有N
+
+slr_AF %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+slr_NAF %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+
+slr_AF[slr_AF$indicator == "N", ]$SLR_R2 = 
+  slr_AF[slr_AF$indicator == "N", ]$log_SLR_R2
+
+slr_NAF[slr_NAF$indicator == "N" , ]$SLR_R2 = 
+  slr_NAF[slr_NAF$indicator == "N", ]$log_SLR_R2
+
+radar_plot(slr_AF)
+radar_plot(slr_NAF)
+
+# save radar plot
+slr_AF
+pdf( paste0("outputs/Radar4_AF.pdf"), width=10, height=10)
+radar_plot(slr_AF)
+dev.off()
+
+slr_NAF
+pdf( paste0("outputs/Radar4_NAF.pdf"), width=10, height=10)
+radar_plot(slr_NAF)
+dev.off()
+
+```
+
+```{r  fig.height=8, fig.width=8}
+set.seed(123456)
+x<-1:126
+x
+y<-sin(7*x*pi/126)
+df<-data.frame(x1=x,
+               y1=abs(y),
+               var=gl(7,18,labels = slr_AF[2:8, 1]))
+
+df
+
+df_AF<-data.frame(x=slr_AF[2:8, 1],
+               y=slr_AF[2:8, 7])
+df_AF
+
+df_NAF<-data.frame(x=slr_NAF[2:8, 1],
+               y=slr_NAF[2:8, 7])
+df_NAF
+
+# merge(df,df_AF,by.x = 'var',by.y = 'x') %>% 
+#   mutate(new_y=y1*y) -> df1
+# 
+# merge(df,df_NAF,by.x = 'var',by.y = 'x') %>% 
+#   mutate(new_y=y1*y) -> df2
+
+merge(df,df_AF,by.x = 'var',by.y = 'x') %>%
+  mutate(new_y=y1*(y+0.3)) -> df1
+
+merge(df,df_NAF,by.x = 'var',by.y = 'x') %>%
+  mutate(new_y=y1*(y+0.3))-> df2
+
+p_NAF<-ggplot()+
+  geom_area(data = data.frame(x=1:126,y=1.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "solid",
+            show.legend = F)+
+  ggnewscale::new_scale_fill()+
+  geom_area(data=df1,aes(x=x1,y=new_y,fill=var),
+            fill="#FDB462",
+            color ="#FDB462",
+            linetype = "solid",
+            alpha=0.5)+
+  geom_area(data=df2,aes(x=x1,y=new_y,fill=var),
+            fill = "#80B1D3",
+            color = "#80B1D3",
+            linetype = "solid",
+            alpha=0.5)+
+  scale_fill_manual(values = brewer.pal(name="Set3",11))+
+  coord_polar()+
+  geom_area(data = data.frame(x=1:126,y=1.05),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:126,y=0.8),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:126, y=0.55),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:126, y=0.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  theme_void()+
+  # # scale_x_continuous(breaks = seq(2,54,18),
+  #                    labels = df$x)
+  # geom_text(data=df,aes(x=seq(2,54,18),
+  #                        y=y+0.2,
+  #                        label=y))+
+  geom_text(data=df2 %>% filter(y1==1),
+            aes(x=x1,y=y1+0.6,label=var),
+            fontface="italic")
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.2,label=B))+
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.6,label=D))+
+  # annotate(geom = "text",x=10,y=2,label="Core 10665")+
+  # theme(legend.position = "none")
+
+pdf( paste0("outputs/p_NAF.pdf"), width=10, height=10)
+plot(p_NAF)
+dev.off()
+
+```
+
+
+
+## Compare grass vs legume
+```{r radar plot, fig.height=8, fig.width=8}
+slr_all <- SLR_yield(sub_data, "all")
+
+slr_grass <- SLR_yield(sub_data %>% 
+                         filter(CoverCropGroup == "Grass"), "5_grass")
+
+# select variables available for both grass and legume
+slr_grass %>% 
+  filter(indicator %in% 
+           c('BiomassCash', 'BD', 'OC', 'N', 'P', 'K', 'pH', 'CEC', 'SWC', 'Nmina', 'MBN')) -> slr_grass
+
+slr_legume <- SLR_yield(sub_data %>% 
+                         filter(CoverCropGroup == "Legume"), "5_legume")
+slr_legume %>% 
+  filter(indicator %in% 
+           c('BiomassCash', 'BD', 'OC', 'N', 'P', 'K', 'pH', 'CEC', 'SWC', 'Nmina', 'MBN')) -> slr_legume
+
+# write.csv(slr_grass, 'E:/1/SoilHealth_Yield/data/slr_grass.csv') 
+# write.csv(slr_legume, 'E:/1/SoilHealth_Yield/data/slr_legume.csv')
+
+
+# 加上N
+# K log transfered
+# 修改：只有N
+# # 校稿：无需转换（对结果无影响）
+
+slr_grass %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+slr_legume %>% dplyr::select(indicator, p_slope_b, log_p_slope_b, SLR_R2, log_SLR_R2, improved_R2)
+
+slr_grass[slr_grass$indicator == "N", ]$SLR_R2 = 
+  slr_grass[slr_grass$indicator == "N", ]$log_SLR_R2
+
+slr_legume[slr_legume$indicator == "N", ]$SLR_R2 = 
+  slr_legume[slr_legume$indicator == "N", ]$log_SLR_R2
+
+radar_plot(slr_all)
+radar_plot(slr_grass)
+radar_plot(slr_legume)
+
+# output radar plot as tiff 
+# tiff("outputs/Radar_all.tiff", width = 10, height = 10, pointsize = 1/300, units = 'in', res = 300)
+pdf( paste0("outputs/Radar_all.pdf"), width=10, height=10)
+radar_plot(slr_all)
+dev.off()
+
+# save radar plot
+slr_grass
+pdf( paste0("outputs/Radar5_grass.pdf"), width=10, height=10)
+radar_plot(slr_grass)
+dev.off()
+
+slr_legume
+pdf( paste0("outputs/Radar5_legume.pdf"), width=10, height=10)
+radar_plot(slr_legume)
+dev.off()
+
+```
+
+
+```{r  fig.height=8, fig.width=8}
+set.seed(123456)
+x<-1:162
+x
+y<-sin(9*x*pi/162)
+df<-data.frame(x1=x,
+               y1=abs(y),
+               var=gl(9,18,labels = slr_grass[2:10, 1]))
+
+df
+
+df_grass<-data.frame(x=slr_grass[2:10, 1],
+               y=slr_grass[2:10, 7])
+df_grass
+
+df_legume<-data.frame(x=slr_legume[c(2:7,9:11), 1],
+               y=slr_legume[c(2:7,9:11), 7])
+df_legume
+
+# merge(df,df_grass,by.x = 'var',by.y = 'x') %>% 
+#   mutate(new_y=y1*y) -> df1
+# 
+# merge(df,df_legume,by.x = 'var',by.y = 'x') %>% 
+#   mutate(new_y=y1*y) -> df2
+# 
+merge(df,df_grass,by.x = 'var',by.y = 'x') %>%
+  mutate(new_y=y1*(y+0.3)) -> df1
+
+merge(df,df_legume,by.x = 'var',by.y = 'x') %>% 
+  mutate(new_y=y1*(y+0.3)) -> df2
+
+
+p_legume<-ggplot()+
+  geom_area(data = data.frame(x=1:162,y=1.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "solid",
+            show.legend = F)+
+  ggnewscale::new_scale_fill()+
+  geom_area(data=df1,aes(x=x1,y=new_y,fill=var),
+            fill="#6d9d88",
+            color ="#6d9d88",
+            linetype = "solid",
+            alpha=0.5)+
+  geom_area(data=df2,aes(x=x1,y=new_y,fill=var),
+            fill = "#FB8072",
+            color = "#FB8072",
+            linetype = "solid",
+            alpha=0.5)+
+  scale_fill_manual(values = brewer.pal(name="Set3",9))+
+  coord_polar()+
+  geom_area(data = data.frame(x=1:162,y=1.05),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:162,y=0.8),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:162, y=0.55),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  geom_area(data = data.frame(x=1:162, y=0.3),
+            aes(x=x,y=y),
+            fill='0',
+            alpha=0,
+            color="black",
+            linetype = "dashed",
+            show.legend = F)+
+  theme_void()+
+  # # scale_x_continuous(breaks = seq(2,54,18),
+  #                    labels = df$x)
+  # geom_text(data=df,aes(x=seq(2,54,18),
+  #                        y=y+0.2,
+  #                        label=y))+
+  geom_text(data=df2 %>% filter(y1==1),
+            aes(x=x1,y=y1+0.6,label=var),
+            fontface="italic")
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.2,label=B))+
+  # geom_text(data=df2 %>% filter(y1==1),
+  #           aes(x=x1,y=y1-0.6,label=D))+
+  # annotate(geom = "text",x=10,y=2,label="Core 10665")+
+  # theme(legend.position = "none")
+
+pdf( paste0("outputs/p_legume.pdf"), width=10, height=10)
+plot(p_legume)
+dev.off()
+
+```
+
+
+## Fill Color
+```{r prepare data for radar}
+slr_all <- SLR_yield(sub_data, "all")
+```
+
+```{r radar plot, fig.height=8, fig.width=8}
+# install.packages('fmsb')
+library(fmsb)
+
+radar_plot <- function(sdata,color = "#00AFBB") {
+  rbind(
+    rep(1, nrow(sdata)) , rep(0,nrow(sdata)),
+    sdata %>% 
+      dplyr::select(indicator, SLR_R2) %>% 
+      spread(key = indicator, value = SLR_R2)) -> radar_data
+  
+  # plot
+  radarchart(radar_data %>% dplyr::select(-BiomassCash), # remove some indicators not interested in
+             caxislabels = c(0, 5, 10, 15, 20),
+             pcol = color, pfcol = scales::alpha(color, 0.5), plwd = 2, plty = 1,
+             cglcol = "grey", cglty = 1, cglwd = 0.8,
+             axislabcol = "grey", 
+             axistype=6 , vlcex=1.0 )
+}
+
+
+radar_plot(slr_all)
+
+# output radar plot as tiff 
+# tiff("outputs/Radar_all.tiff", width = 10, height = 10, pointsize = 1/300, units = 'in', res = 300)
+pdf( paste0("outputs/Radar_all.pdf"), width=10, height=10)
+radar_plot(slr_all)
+dev.off()
+```
+
+## Fill Color
+## Compare grass vs legume
+```{r prepare data for radar}
+slr_grass <- SLR_yield(sub_data %>% 
+                         filter(CoverCropGroup == "Grass"), "grass")
+# select variables available for both grass and legume
+slr_grass %>% 
+  filter(indicator %in% 
+           c('Aggre', 'BD', 'BiomassCash', 'CEC', 'Fungal', 'Infiltration', 'K', 'MBC', 'MBN', 'N', 'Nmina',
+             'OC', 'P', 'Penetration', 'Pests', 'pH', 'SWC', 'Weed')) -> slr_grass
+
+slr_legume <- SLR_yield(sub_data %>% 
+                         filter(CoverCropGroup == "Legume"), "legume")
+slr_legume %>% 
+  filter(indicator %in% 
+           c('Aggre', 'BD', 'BiomassCash', 'CEC', 'Fungal', 'Infiltration', 'K', 'MBC', 'MBN', 'N', 'Nmina',
+             'OC', 'P', 'Penetration', 'Pests', 'pH', 'SWC', 'Weed')) -> slr_legume
+```
+
+```{r radar plot, fig.height=8, fig.width=8}
+# install.packages('fmsb')
+library(fmsb)
+
+radar_plot1 <- function(sdata,color = "#E7B800") {
+  rbind(
+    rep(1, nrow(sdata)) , rep(0,nrow(sdata)),
+    sdata %>% 
+      dplyr::select(indicator, SLR_R2) %>% 
+      spread(key = indicator, value = SLR_R2)) -> radar_data
+
+  # plot
+  radarchart(radar_data %>% dplyr::select(-BiomassCash), # remove some indicators not interested in
+             caxislabels = c(0, 5, 10, 15, 20),
+             pcol = color, pfcol = scales::alpha(color, 0.5), plwd = 2, plty = 1,
+             cglcol = "grey", cglty = 1, cglwd = 0.8,
+             axislabcol = "grey", 
+             axistype=6 , vlcex=1.0 )
+}
+
+radar_plot2 <- function(sdata,color = "#FC4E07") {
+  rbind(
+    rep(1, nrow(sdata)) , rep(0,nrow(sdata)),
+    sdata %>% 
+      dplyr::select(indicator, SLR_R2) %>% 
+      spread(key = indicator, value = SLR_R2)) -> radar_data
+  
+  # plot
+  radarchart(radar_data %>% dplyr::select(-BiomassCash), # remove some indicators not interested in
+             caxislabels = c(0, 5, 10, 15, 20),
+             pcol = color, pfcol = scales::alpha(color, 0.5), plwd = 2, plty = 1,
+             cglcol = "grey", cglty = 1, cglwd = 0.8,
+             axislabcol = "grey", 
+             axistype=6 , vlcex=1.0 )
+}
+
+
+radar_plot1(slr_grass)
+radar_plot2(slr_legume)
+
+
+# output radar plot as tiff 
+# tiff("outputs/Radar_all.tiff", width = 10, height = 10, pointsize = 1/300, units = 'in', res = 300)
+
+# save radar plot for grass
+pdf( paste0("outputs/Radar_grass.pdf"), width=10, height=10)
+radar_plot1(slr_grass)
+dev.off()
+
+# save radar plot for legume
+pdf( paste0("outputs/Radar_legume.pdf"), width=10, height=10)
+radar_plot2(slr_legume)
+dev.off()
+```
+
+## bootstrap and get results for all variables
+```{r}
+boosting_variable <- function (sdata, term, treatment) {
+  k = n_rep
+  # n_sample: set it equals to the original sample size
+  mysamples = replicate(k, sample(sdata$yi, replace=T))
+  mymeans = apply(mysamples, 2, mean, na.rm = T)
+  
+  # quantile
+  BootsTest <- quantile(mymeans,c(0.025, 0.50, 0.975))
+  Boots_outputs <- tibble(term, treatment, (exp(BootsTest[[1]])-1)*100, (exp(BootsTest[[2]])-1)*100
+                          , (exp(BootsTest[[3]])-1)*100, nrow(sdata), unique(sdata$StudyID) %>% length )
+  colnames(Boots_outputs) <- c("Term", "Treatment", "Low", "Mean", "High", "obs", "n_study")
+  return(Boots_outputs)
+}
+```
+
+## do bootstrap
+```{r different variables}
+# for soil texture comparison
+## do MBN and Infiltration
+boosting_variable (sub_data %>% 
+                     dplyr::select(StudyID, TextureGroup, MBN_C, MBN_T) %>% 
+                     filter (TextureGroup =="Coarse") %>% 
+                     na.omit() %>% 
+                     mutate(yi = log(MBN_T) - log(MBN_C)),
+                   "MBN_Coarse", "Coarse") -> boots_variables
+
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, TextureGroup, MBN_C, MBN_T) %>% 
+                       filter (TextureGroup %in% "Medium") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(MBN_T) - log(MBN_C)),
+                     "MBN_Medium", "Medium")) -> boots_variables
+
+## infiltration
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, TextureGroup, Infiltration_C, Infiltration_T) %>% 
+                       filter (TextureGroup %in% "Coarse") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(Infiltration_T) - log(Infiltration_C)),
+                     "Infiltration_Coarse", "Coarse")) -> boots_variables
+
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, TextureGroup, Infiltration_C, Infiltration_T) %>% 
+                       filter (TextureGroup %in% "Medium") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(Infiltration_T) - log(Infiltration_C)),
+                     "Infiltration_Medium", "Medium")) -> boots_variables
+
+
+# for different cash crop
+## Nmina
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, GrainCropGroup, Nmina_C, Nmina_T) %>% 
+                       filter (GrainCropGroup %in% "Corn") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(Nmina_T) - log(Nmina_C)),
+                     "Nmina_Corn", "Corn")) -> boots_variables
+
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, GrainCropGroup, Nmina_C, Nmina_T) %>% 
+                       filter (GrainCropGroup %!in% "Corn") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(Nmina_T) - log(Nmina_C)),
+                     "Nmina_NotCorn", "NotCorn")) -> boots_variables
+
+
+# for  cover crop comparison
+## do MBN and Fungal
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, CoverCropGroup, MBN_C, MBN_T) %>% 
+                       filter (CoverCropGroup %in% "Grass") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(MBN_T) - log(MBN_C)),
+                     "MBN_Grass", "Grass")) -> boots_variables
+
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, CoverCropGroup, MBN_C, MBN_T) %>% 
+                       filter (CoverCropGroup %in% "Legume") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(MBN_T) - log(MBN_C)),
+                     "MBN_Legume", "Legume")) -> boots_variables
+
+## Fungal
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, CoverCropGroup, Fungal_C, Fungal_T) %>% 
+                       filter (CoverCropGroup %in% "Grass") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(Fungal_T) - log(Fungal_C)),
+                     "Fungal_Grass", "Grass")) -> boots_variables
+
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, CoverCropGroup, Fungal_C, Fungal_T) %>% 
+                       filter (CoverCropGroup %in% "Legume") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(Fungal_T) - log(Fungal_C)),
+                     "Fungal_Legume", "Legume")) -> boots_variables
+
+
+
+
+# for ConservationGroup
+## do SWC and Penetration
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, ConservationGroup, SWC_C, SWC_T) %>% 
+                       filter (ConservationGroup %in% "AF") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(SWC_T) - log(SWC_C)),
+                     "SWC_AF", "AF")) -> boots_variables
+
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, ConservationGroup, SWC_C, SWC_T) %>% 
+                       filter (ConservationGroup %!in% "AF") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(SWC_T) - log(SWC_C)),
+                     "SWC_NotAF", "NotAF")) -> boots_variables
+
+
+
+## Penetration
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, ConservationGroup, Penetration_C, Penetration_T) %>% 
+                       filter (ConservationGroup %in% "AF") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(Penetration_T) - log(Penetration_C)),
+                     "Penetration_AF", "AF")) -> boots_variables
+
+bind_rows(
+  boots_variables,
+  boosting_variable (sub_data %>% 
+                       dplyr::select(StudyID, ConservationGroup, Penetration_C, Penetration_T) %>% 
+                       filter (ConservationGroup %!in% "AF") %>% 
+                       na.omit() %>% 
+                       mutate(yi = log(Penetration_T) - log(Penetration_C)),
+                     "Penetration_NotAF", "NotAF")) -> boots_variables
+
+boots_variables
+
+```
+
+
+
+```{r Plot boots_variables results, fig.height=10, fig.width=8}
+boots_outputs %>% 
+  filter(Term %in% c("boots_variables")) -> boots_variablesGroup
+
+
+# plot  boots_variables
+boots_variables %>% 
+  mutate(y = c(15.5,14.5,13.5,12.5,11,10,8.5, 7.5, 6.5, 5.5, 4, 3, 2, 1)) %>% 
+  ggplot(aes(Mean, y)) +
+  geom_point(pch = c(12,12,12,12,16,16,14,14,14,14,10,10,10,10),
+             size =3.5) +
+  geom_point(aes(Low, y), pch = "|", size = 2.5) +
+  geom_point(aes(High, y), pch = "|", size = 2.5) +
+  geom_segment(aes(x = Low, y = y, xend = High, yend = y), colour = c("black","black","black","black","black","black","black","black","black","black","black","black","black","black") , size = 1.0) +
+  geom_vline(xintercept = 0, linetype="dashed", 
+             color = "red", size=1) +
+  geom_hline(yintercept = c(11.75,9.25, 4.75), linetype="solid", 
+             color = "gray") +
+  labs(x = expression(Response~('% changes'))) +
+  theme(axis.title.y = element_blank()) +
+  scale_y_continuous(breaks = c(15.5,14.5,13.5,12.5,11,10,8.5, 7.5, 6.5, 5.5, 4, 3, 2, 1),
+                     labels = c("MBN_Coarse","MBN_Medium","Infiltration_Coarse", "Infiltration_Medium", "Nmina_Corn", "Nmina_NotCorn", "SWC_AF","SWC_NotAF","Penetration_AF","Penetration_NotAF","MBN_Grass","MBN_Legume","Fungal_Grass","Fungal_Legume")) +
+  geom_text(x=rep(-80,14),
+            y=c(15.5,14.5,13.5,12.5,11,10,8.5, 7.5, 6.5, 5.5, 4, 3, 2, 1),
+            label=paste0(boots_variables$obs,"/",boots_variables$n_study),
+            size = 5,
+            hjust = 0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  xlim(c(-100, 250)) -> plot_boots_variables
+
+# ggsave("outputs/Figure 4_boots_variables.jpg", width = 8, height = 10, dpi = 300, units = c("in"))
+
+```
+
+
+```{r find papers}
+subset(sub_data, ConservationGroup == "AF") %>% 
+  dplyr::select(StudyID) %>% 
+  unique() %>% 
+  arrange(StudyID)
+
+subset(sub_data, GrainCropGroup == "Corn") %>% 
+  dplyr::select(StudyID) %>% 
+  unique() %>% 
+  arrange(StudyID)
+```
+
+
+```{r}
+sub_data %>% 
+  dplyr::select(StudyID, ExperimentID, Country, Longitude, Latitude, Top_Climate, TextureGroup, ConservationGroup, CoverCropGroup, GrainCropGroup, yi) %>% 
+  group_by(StudyID, ExperimentID, Country, Longitude, Latitude, Top_Climate, TextureGroup, ConservationGroup, CoverCropGroup,
+           GrainCropGroup) %>% 
+  summarise(yi = mean(yi)) %>% 
+  na.omit() -> sum_all_map
+
+# dplyr::left_join(sum_all, sum_all_map, by = "StudyID" ) -> sum_all_map
+
+sum_all_map %>% 
+  dplyr::select(Latitude, Longitude, ConservationGroup) %>% 
+  summarise(Obs = n()) %>% 
+  filter(ConservationGroup %!in% c("Others", "Not available")) %>% 
+  rename("Conservation" = "ConservationGroup") -> siteInfor_map
+
+# plot global site map
+counties <- map_data("world", region = ".", exact = FALSE)
+
+map_2 <- ggplot(data = counties) + 
+  geom_polygon(aes(x = long, y = lat, group = group),
+               color = "white",
+               fill = 'gray') + 
+  guides(fill=FALSE) +
+  geom_point(data = siteInfor_map,
+             aes(x=Longitude, y=Latitude,
+                 size = Obs,
+                 shape = Conservation,
+                 col = Conservation),
+             alpha = 0.75,
+             stroke = 1.5) +
+  scale_x_continuous(name="Longitude", breaks=seq(-180,180, 60),labels = seq(-180,180, 60))+
+  scale_y_continuous(limits = c(-60, 90),name="Latitude", breaks=seq(-60,90,30),labels = seq(-60,90,30)) +
+  scale_size_continuous(name = "Obs (n)") 
+
+map_2
+
+map_1 / map_2 +
+  # plot_layout(widths = c(1.5, 1)) +
+  plot_annotation(tag_levels = "a", tag_prefix = "(", tag_suffix = ")") 
+ 
+# ggsave("outputs/Figure1_revisiom_discussion.png", width = 8, height = 8)
+
+```
+
+
+
+
+## plot for discussion
+```{r corn yield changes under CA}
+# cash crop
+
+subset(sum_all_map, GrainCropGroup == "Corn")
+subset(sum_all_map, GrainCropGroup == "Corn") %>%
+  dplyr::select(Country) %>% unique()
+
+worldMap <- map_data(map = "world")
+basemap <- word_bkgd(worldMap) 
+
+basemap + 
+  geom_point(data = subset(sum_all_map, GrainCropGroup != "Corn"),
+             aes(x=Longitude, y=Latitude),
+             alpha = 0.75, shape = 16, col = "black",
+             stroke = 1) +
+  geom_point(data = subset(sum_all_map, GrainCropGroup == "Corn"),
+             aes(x=Longitude, y=Latitude),
+             alpha = 0.75, shape = 1, col = "orange", size = 2, 
+             stroke = 1) +
+  geom_point(data = tibble(x = rep(-170, 2),  y = c(-10, -40),  size = 1),
+             aes(x, y, size = size), shape = c(1, 16), color = c("orange", "black"),
+             alpha = 1, stroke = 1) +
+  annotate("text", x = -160, y = c(-10, -40), 
+           label = c("Corn", "Other cash crops"),size = c(3,3), hjust = 0) -> plot_corn
+
+plot_corn
+
+
+```
+
+```{r plot bar chart for corn and not corn}
+
+subset(sum_all_map, GrainCropGroup == "Corn") %>%
+  count(TextureGroup)
+subset(sum_all_map, GrainCropGroup == "Corn") %>%
+  count(ConservationGroup)
+
+sum_all_map %>% 
+  mutate(Top_GrainCrop = case_when(
+    GrainCropGroup == "Corn" ~ "Corn",
+    TRUE ~ "Other cash crops")) %>% 
+  filter(TextureGroup != "NotAvailable") %>% 
+  count(TextureGroup, Top_GrainCrop) %>% 
+  ggplot(aes(fill=TextureGroup, y=n, x=Top_GrainCrop)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_y_continuous(labels=scales::percent) +
+  theme(axis.title = element_blank()) +
+  guides(fill=guide_legend(title="Texture")) -> plot_cash_texture
+
+plot_cash_texture
+
+
+sum_all_map %>% 
+  mutate(Top_GrainCrop = case_when(
+    GrainCropGroup == "Corn" ~ "Corn",
+    TRUE ~ "Other cash crops")) %>% 
+  filter(Top_Climate != "NotAvailable") %>% 
+  count(Top_Climate, Top_GrainCrop) %>% 
+  ggplot(aes(fill=Top_Climate, y=n, x=Top_GrainCrop)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_y_continuous(labels=scales::percent) +
+  theme(axis.title = element_blank()) +
+  guides(fill=guide_legend(title="Climate")) -> plot_cash_Climate
+
+plot_cash_Climate
+
+
+```
+
+
+```{r yield changes under AF}
+# AF
+subset(sum_all_map, ConservationGroup == "AF")
+
+basemap + 
+  geom_point(data = subset(sum_all_map, ConservationGroup != "AF"),
+             aes(x=Longitude, y=Latitude),
+             alpha = 0.75, shape = 16, col = "black",
+             stroke = 1) +
+  geom_point(data = subset(sum_all_map, ConservationGroup == "AF"),
+             aes(x=Longitude, y=Latitude),
+             alpha = 0.75, shape = 1, col = "green", size = 2, 
+             stroke = 1) +
+  geom_point(data = tibble(x = rep(-170, 2),  y = c(-10, -40),  size = 1),
+             aes(x, y, size = size), shape = c(1, 16), color = c("green", "black"),
+             alpha = 1, stroke = 1) +
+  annotate("text", x = -160, y = c(-10, -40), 
+           label = c("Agroforestry", "Other CA"),size = c(3,3), hjust = 0) -> plot_AF
+
+plot_AF
+
+
+sum_all_map %>% 
+  mutate(Top_CA = case_when(
+    ConservationGroup == "AF" ~ "AF",
+    TRUE ~ "Other CA")) %>% 
+  filter(GrainCropGroup != "NotAvailable") %>% 
+  count(GrainCropGroup, Top_CA) %>% 
+  ggplot(aes(fill=GrainCropGroup, y=n, x=Top_CA)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_y_continuous(labels=scales::percent) +
+  theme(axis.title = element_blank()) +
+  guides(fill=guide_legend(title="Texture")) -> plot_CA_GrainCrop
+
+plot_CA_GrainCrop
+
+sum_all_map %>% 
+  mutate(Top_CA = case_when(
+    ConservationGroup == "AF" ~ "AF",
+    TRUE ~ "Other CA")) %>% 
+  filter(TextureGroup != "NotAvailable") %>% 
+  count(TextureGroup, Top_CA) %>% 
+  ggplot(aes(fill=TextureGroup, y=n, x=Top_CA)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_y_continuous(labels=scales::percent) +
+  theme(axis.title = element_blank()) +
+  guides(fill=guide_legend(title="Texture")) -> plot_CA_texture
+
+plot_CA_texture
+
+
+sum_all_map %>% 
+  mutate(Top_CA = case_when(
+    ConservationGroup == "AF" ~ "AF",
+    TRUE ~ "Other CA")) %>% 
+  filter(Top_Climate != "NotAvailable") %>% 
+  count(Top_Climate, Top_CA) %>% 
+  ggplot(aes(fill=Top_Climate, y=n, x=Top_CA)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_y_continuous(labels=scales::percent) +
+  theme(axis.title = element_blank()) +
+  guides(fill=guide_legend(title="Climate")) -> plot_CA_Climate
+
+plot_CA_Climate
+
+
+```
+
+
+```{r yield of medium vs other}
+# AF
+subset(sum_all_map, TextureGroup == "Medium")
+
+basemap + 
+  geom_point(data = subset(sum_all_map, TextureGroup != "Medium"),
+             aes(x=Longitude, y=Latitude),
+             alpha = 0.75, shape = 16, col = "black",
+             stroke = 1) +
+  geom_point(data = subset(sum_all_map, TextureGroup == "Medium"),
+             aes(x=Longitude, y=Latitude),
+             alpha = 0.75, shape = 1, col = "red", size = 2, 
+             stroke = 1) +
+  geom_point(data = tibble(x = rep(-170, 2),  y = c(-10, -40),  size = 1),
+             aes(x, y, size = size), shape = c(1, 16), color = c("red", "black"),
+             alpha = 1, stroke = 1) +
+  annotate("text", x = -160, y = c(-10, -40), 
+           label = c("Medium", "Coarse and fine"),size = c(3,3), hjust = 0) -> plot_Texture
+
+plot_Texture
+
+sum_all_map %>% count(TextureGroup)
+sum_all_map %>% 
+  filter(TextureGroup != "NotAvailable") %>%
+  mutate(Top_Texture = case_when(
+    TextureGroup == "Medium" ~ "Medium",
+    TRUE ~ "Coarse and fine")) %>% 
+  filter(!ConservationGroup %in% c("Not available", "NTRT", "Others")) %>% 
+  count(ConservationGroup, Top_Texture) %>% 
+  mutate(Top_Texture = factor(Top_Texture, levels = c("Medium", "Coarse and fine"))) %>% 
+  ggplot(aes(fill=ConservationGroup, y=n, x=Top_Texture)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_y_continuous(labels=scales::percent) +
+  theme(axis.title = element_blank()) +
+  guides(fill=guide_legend(title="Conservation")) -> plot_texture_CA
+
+plot_texture_CA
+
+sum_all_map %>% count(TextureGroup)
+sum_all_map %>% 
+  filter(TextureGroup != "NotAvailable") %>%
+  mutate(Top_Texture = case_when(
+    TextureGroup == "Medium" ~ "Medium",
+    TRUE ~ "Coarse")) %>% 
+  filter(Top_Climate != "NotAvailable") %>% 
+  count(Top_Climate, Top_Texture) %>% 
+  mutate(Top_Texture = factor(Top_Texture, levels = c("Medium", "Coarse"))) %>% 
+  ggplot(aes(fill=Top_Climate, y=n, x=Top_Texture)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_y_continuous(labels=scales::percent) +
+  theme(axis.title = element_blank()) +
+  guides(fill=guide_legend(title="Climate")) -> plot_texture_Climate
+
+plot_texture_Climate
+
+
+```
+
+
+```{r plot and output results}
+(plot_corn | plot_cash_Climate | plot_cash_texture) / (plot_Texture | plot_texture_Climate | plot_texture_CA) / (plot_AF | plot_CA_Climate | plot_CA_texture) +
+  # plot_layout(widths = c(1.5, 1)) +
+  plot_annotation(tag_levels = "a", tag_prefix = "(", tag_suffix = ")") +
+  theme(plot.tag = element_text(size = 20, face = "bold"))
+
+ggsave("outputs/Figure 8_all.png", width = 12, height = 6)
+```
+
+
+```{r}
+sub_data %>% 
+  dplyr::select(yi, Aggre_C, BD_C, CEC_C, Erosion_C, Infiltration_C,
+                K_C, Ksat_C, Leaching_C, N_C, OC_C, P_C, pH_C, Porosity_C, SWC_C) %>% 
+  na.omit()
+
+sub_data %>% 
+  dplyr::select(yi, OC_C, N_C, P_C, pH_C) %>% 
+  na.omit()
+```
+
